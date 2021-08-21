@@ -1,0 +1,64 @@
+
+# squares an input x
+// returns the square of x
+/* returns the square of x */
+" returns the square of x
+(* returns the square of x *)
+; returns the square of x
+-- returns the square of x
+def square(x):
+    return x * x
+
+let x = /* square of x */
+
+x.value = " square of x "
+
+# primitive expressions + means of combination + means of abstraction
+# code as data?
+
+# comments as primitives? or fully-featured objects
+
+commentlisp
+- inspired by lisp?
+
+# what if ... human-powered programming language (like mechanical turk lol)
+
+annotate functions with comments? or pass comments as arguments
+
+let x = 2;
+
+int square(x); // a function that returns the square of the input
+
+make optimizations to reduce amount of work humans have to do
+
+print("Hello, world!");
+
+(define (square x) (* the square of x *))
+
+(define (compose f g) (lambda (x) (f (g x))))
+
+(define pow4 (compose square square))
+
+open-source interpreter, powered by the community
+the first human-powered programming language
+after all, aren't comments for humans to read?
+
+don't know how to implement an algorithm? just add a comment, someone else will do it
+
+what makes this different from copilot?
+
+separate primitive operations into different "difficulties"
+1st grade - basic math, addition, subtraction
+12th grade - take the derivative of a function
+
+define schemas for human cpus to fill in
+web app front-end (is program back-end lmao)
+
+queue of operations, everything async
+like algebraic effects huh
+
+humanlisp
+
+essentiallly, comments are just another type of primitive, but must be async evaluated
+essentially lazy evaluation
+delay/force, comment/evaluate
