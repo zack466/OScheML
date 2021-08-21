@@ -62,3 +62,5 @@ humanlisp
 essentiallly, comments are just another type of primitive, but must be async evaluated
 essentially lazy evaluation
 delay/force, comment/evaluate
+
+c-expr - the comment expression
