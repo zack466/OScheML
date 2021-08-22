@@ -1,11 +1,33 @@
 open Base
 open Stdio
 
+module Hashtbl_printable = struct
+  type ('k,'s) t = ('k, 's) Hashtbl.t
+
+  let pp pp_key pp_value ppf  values =
+      (* get rid of 'unused values' warning *)
+      let _ = pp_key in
+      let _ = pp_value in
+      let _ = ppf in
+      let _ = values in
+      () (* not actually printing anything bc results in stack overflow *)
+end
+
+let print str =
+    Out_channel.output_string stdout str;
+    Out_channel.output_string stdout "\n";
+    Out_channel.flush stdout;
+
 type lisp = 
     | Atom of string
     | Number of float
+    | Boolean of bool
     | String of string
+    | Quote of lisp
     | List of lisp list
+    | Pair of lisp list (* must have only 2 items, unfortunate schism bc list by itself cannot tell the difference between (cons 1 2) and (cons 1 '(2)) *)
+    | Lambda of lisp * environment ref (* extra variant just to store closure environment *)
+and environment = | Env of environment ref option * (string, lisp) Hashtbl_printable.t
 [@@deriving show]
 
 let nil = List []
@@ -15,6 +37,7 @@ let parse =
 
     let lp = char '(' <?> "lparen" in
     let rp = char ')' <?> "rparen" in
+    let quote = char '\'' <?> "quote" in
 
     let num =
         take_while1 (function
@@ -28,39 +51,64 @@ let parse =
     let string =
         char '"' *> take_while1 (function '"' -> false | _ -> true) <* char '"' <?> "string literal"
         >>| fun x -> String x in
+    
+    let boolean_true =
+        Angstrom.string "#t" <?> "boolean literal"
+        >>| fun _ -> Boolean true in
 
-    let atom = take_while1 (function ' ' | '(' | ')' -> false | _ -> true) <?> "atom"
+    let boolean_false =
+        Angstrom.string "#f" <?> "boolean literal"
+        >>| fun _ -> Boolean false in
+
+    let atom = take_while1 (function ' ' | '(' | ')' | '\'' | '"' -> false | _ -> true) <?> "atom"
         >>| fun x -> Atom x in
 
     let ws = skip_while (function
       | '\x20' | '\x0a' | '\x0d' | '\x09' -> true
       | _ -> false) in
 
+    (* this function has broken my soul *)
     let lisp = fix (fun lisp ->
-        let inside = many (ws *> choice [num; string; atom; lisp] <* ws) in
-        lp *> inside <* rp
-        >>| fun x -> List x) in
-    
-    parse_string ~consume:All lisp
+        let ele = choice [num; string; boolean_true; boolean_false; atom] in
+        let list = lp *> many (ws *> lisp <* ws) <* rp >>| fun x -> List x in
+        (both (option '\x00' quote) (list <|> ele)
+        >>| fun res -> match res with
+        | ('\'', x) -> Quote x
+        | (_, x) -> x)
+    ) in
 
-let print str =
-    Out_channel.output_string stdout str;
-    Out_channel.output_string stdout "\n";
-    Out_channel.flush stdout;
+    parse_string ~consume:All lisp
 
 exception UndefinedIdentifier of string
 
-let lookup env x =
-    match Hashtbl.find env x with
-    | Some v -> v
-    | None -> raise (UndefinedIdentifier x)
+let env_new parent =
+    match parent with
+    | Some parent_env -> Env (Some parent_env,  Hashtbl.create(module String))
+    | None -> Env (None, Hashtbl.create(module String))
+
+let rec env_lookup env x =
+    match env with
+    | Env (Some parent, current) -> (
+        match Hashtbl.find current x with
+        | Some v -> v
+        | None -> env_lookup !parent x
+    )
+    | Env (None, current) -> (
+        match Hashtbl.find current x with
+        | Some v -> v
+        | None -> raise (UndefinedIdentifier ("identifier " ^ x ^ " not found"))
+    )
+
+let env_set env ~key ~data =
+    match env with
+    | Env (_, e) -> Hashtbl.set e ~key:key ~data:data
 
 exception RuntimeError of string
 
 let unbox_number x =
     match x with
     | Number y -> y
-    | _ -> raise (RuntimeError "cannot convert to float")
+    | _ -> raise (RuntimeError ("cannot convert " ^ show_lisp x ^ " to float"))
 
 let sum args =
     match args with
@@ -84,47 +132,208 @@ let div args =
     | [hd] -> 1.0 /. unbox_number hd 
     | hd::tl -> unbox_number hd /. prod tl
 
-(* (define x <body>) binds the identifier x to <body> in the given environment env *)
-let define env args =
-    match args with
-    | [] -> raise (RuntimeError "define requires at least 2 arguments")
-    | [_] -> raise (RuntimeError "define requires at least 2 arguments")
-    | hd::tl -> (
-        
-    )
+let unbox_boolean x =
+    match x with
+    | Boolean y -> y
+    | _ -> raise (RuntimeError ((show_lisp x) ^ "could not be unboxed as boolean"))
 
-let apply env fn args =
-    match fn with
-    | Atom "+" -> Number (sum args)
-    | Atom "*" -> Number (prod args)
-    | Atom "/" -> Number (div args)
-    | Atom "-" -> Number (sub args)
-    | Atom "define" -> define env args; nil
-    | _ -> raise (RuntimeError (show_lisp fn ^ "cannot be applied to " ^ String.concat (List.map args ~f:show_lisp)))
+let rec _and args =
+    match args with
+    | [] -> raise (RuntimeError "and requires at least 2 arguments")
+    | [_] -> raise (RuntimeError "and requires at least 2 arguments")
+    | Boolean x :: Boolean y :: [] -> x && y
+    | Boolean x :: Boolean y :: xs -> if (x && y) then _and (Boolean y :: xs) else false
+    | _ -> raise (RuntimeError "and can only be called on booleans")
+
+let rec _or args =
+    match args with
+    | [] -> raise (RuntimeError "or requires at least 2 arguments")
+    | [_] -> raise (RuntimeError "or requires at least 2 arguments")
+    | Boolean x :: Boolean y :: [] -> x || y
+    | Boolean x :: Boolean y :: xs -> if (x || y) then true else _or (Boolean y :: xs)
+    | _ -> raise (RuntimeError "or can only be called on booleans")
+
+let rec lt args =
+    match args with
+    | [] -> raise (RuntimeError "< requires at least 2 arguments")
+    | [_] -> raise (RuntimeError "< requires at least 2 arguments")
+    | Number x :: Number y :: [] -> Float.(<) x y
+    | Number x :: Number y :: xs -> (Float.(<) x y) && lt (Number y :: xs)
+    | _ -> raise (RuntimeError "< only supports arguments of type number")
+
+let rec lte args =
+    match args with
+    | [] -> raise (RuntimeError "<= requires at least 2 arguments")
+    | [_] -> raise (RuntimeError "<= requires at least 2 arguments")
+    | Number x :: Number y :: [] -> Float.(<=) x y
+    | Number x :: Number y :: xs -> (Float.(<=) x y) && lte (Number y :: xs)
+    | _ -> raise (RuntimeError "<= only supports arguments of type number")
+
+let rec gt args =
+    match args with
+    | [] -> raise (RuntimeError "> requires at least 2 arguments")
+    | [_] -> raise (RuntimeError "> requires at least 2 arguments")
+    | Number x :: Number y :: [] -> Float.(>) x y
+    | Number x :: Number y :: xs -> (Float.(>) x y) && gt (Number y :: xs)
+    | _ -> raise (RuntimeError "> only supports arguments of type number")
+
+let rec gte args =
+    match args with
+    | [] -> raise (RuntimeError "> requires at least 2 arguments")
+    | [_] -> raise (RuntimeError "> requires at least 2 arguments")
+    | Number x :: Number y :: [] -> Float.(>=) x y
+    | Number x :: Number y :: xs -> (Float.(>=) x y) && gte (Number y :: xs)
+    | _ -> raise (RuntimeError ">= only supports arguments of type number")
+
+let rec eq args =
+    match args with
+    | [] -> raise (RuntimeError "= requires at least 2 arguments")
+    | [_] -> raise (RuntimeError "= requires at least 2 arguments")
+    | Number x :: Number y :: [] -> Float.(=) x y
+    | Number x :: Number y :: xs -> (Float.(=) x y) && eq (Number y :: xs)
+    | Boolean x :: Boolean y :: [] -> Bool.(=) x y
+    | Boolean x :: Boolean y :: xs -> (Bool.(=) x y) && eq (Boolean y :: xs)
+    | String x :: String y :: [] -> String.(=) x y
+    | String x :: String y :: xs -> (String.(=) x y) && eq (String y :: xs)
+    | _ -> raise (RuntimeError "= only supports arguments of the same type")
+
+let unbox_atom x =
+    match x with
+    | Atom x -> x
+    | _ -> raise (RuntimeError ("Error unboxing " ^ (show_lisp x)))
+
+(* definition should be a two-element list of [identifier; expression] *)
+let define_var env var definition =
+    env_set env ~key:var ~data:definition
 
 let map l f =
     match l with
     | List x -> List (List.map x ~f:f)
     | _ -> raise (RuntimeError "Cannot map non-list types")
 
-let rec eval (env: (string, lisp) Hashtbl.t) (ast: lisp) : lisp =
+let is_list x = 
+    match x with
+    | List _ -> true
+    | _ -> false
+
+let show args =
+    List.iter args ~f:(fun x -> print (show_lisp x))
+
+let cons args =
+    match args with
+    | x :: List y :: [] -> List (x :: y)
+    | x :: y :: [] -> Pair (x :: y :: [])
+    | _ -> raise (RuntimeError "cons requires exactly 2 arguments")
+
+let car args =
+    match args with
+    | [List (hd :: _)] -> hd
+    | [Pair (hd :: _)] -> hd
+    | _ -> raise (RuntimeError "car requires exactly 1 argument")
+
+let cdr (args: lisp list) =
+    match args with
+    | [List (_ :: tl)] -> List tl
+    | [Pair (_ :: tl :: [])] -> tl
+    | [List []] -> raise (RuntimeError "Illegal datum")
+    | _ -> raise (RuntimeError "cdr requires exactly 1 argument")
+
+let rec apply (env: environment) (fn: lisp) (args: lisp list) =
+    let _ = env in
+    match fn with
+    (* builtins *)
+    | Atom "+" -> Number (sum args)
+    | Atom "*" -> Number (prod args)
+    | Atom "/" -> Number (div args)
+    | Atom "-" -> Number (sub args)
+    | Atom "<" -> Boolean (lt args)
+    | Atom ">" -> Boolean (gt args)
+    | Atom "<=" -> Boolean (lte args)
+    | Atom ">=" -> Boolean (gte args)
+    | Atom "=" -> Boolean (eq args)
+    | Atom "and" -> Boolean (_and args)
+    | Atom "or" -> Boolean (_or args)
+    | Atom "show" -> show args; nil
+    | Atom "cons" -> cons args
+    | Atom "car" -> car args
+    | Atom "cdr" -> cdr args
+    | Lambda (List (Atom "lambda" :: List formals :: List definition :: []), closure) -> (
+        (* applies a lambda by defining each formal parameter as its corresponding arguments in a new child environment
+            and then evaluating it like normal *)
+        if (not (phys_equal (List.count formals) (List.count args))) then
+            let zipped = List.zip_exn (List.map formals ~f:unbox_atom) args in
+            let e = env_new (Some closure) in
+            let _ = List.iter zipped ~f:(fun (a, b) -> env_set e ~key:a ~data:b) in
+            eval e (List definition)
+        else
+            raise (RuntimeError "incorrect number of arguments")
+    )
+    | _ -> raise (RuntimeError (show_lisp fn ^ "cannot be applied to " ^ String.concat (List.map args ~f:show_lisp)))
+
+and eval env ast =
     match ast with
+    (* primitives (self-evaluating) *)
     | List [] -> List []
-    | List (hd::tl) -> apply env (eval env hd) (List.map tl ~f:(eval env))
-    | Atom x -> lookup env x
     | Number x -> Number x
     | String x -> String x
+    | Boolean x -> Boolean x
+    | Pair x -> Pair x
+    (* special forms *)
+    | Quote x -> x
+    | List (Atom "quote" :: List xs :: []) -> List xs
+    | List (Atom "quote" :: Number xs :: []) -> Number xs
+    | List (Atom "quote" :: String xs :: []) -> String xs
+    | List (Atom "quote" :: Boolean xs :: []) -> Boolean xs
+    | List (Atom "quote" :: _) -> raise (RuntimeError "incorrect usage of quote")
+    | List (Atom "if" :: cond :: _then :: _else :: []) -> if (unbox_boolean (eval env cond)) then eval env _then else eval env _else
+    | List (Atom "if" :: _) -> raise (RuntimeError "incorrect usage of if")
+    | List (Atom "cond" :: List (x :: y :: []) :: xs) -> if unbox_boolean (eval env x) then eval env y else eval env (List [Atom "cond" :: xs]) (* TODO *)
+    | List (Atom "lambda" :: _) as x -> Lambda (x, ref env) (* special Lambda variant to hold both lambda and closure *)
+    | Lambda (_, _) as x -> x
+    | List (Atom "begin" :: exprs) ->
+            (* evaluates all of the expressions and returns the result of the last one *)
+            let result = ref nil in
+            let _ = List.iter exprs ~f:(fun x -> result := eval env x) in
+            !result
+    | List (Atom "define" :: Atom var :: body) when (List.length body) > 0 ->
+            (* (define var ...exprs) is reduced to (define var (begin ...exprs)) *)
+            define_var env var (eval env (List (Atom "begin" :: body))); nil
+    | List (Atom "define" :: List formals :: body) -> (
+            match formals with
+            | [] -> raise (RuntimeError "incorrect usage of define")
+            (* (define (f a b c) <body>) is reduced to (define f (lambda (a b c) <body>)) *)
+            | Atom var :: args -> define_var env var (eval env (List (Atom "lambda" :: List args :: List (Atom "begin" :: body) :: []))); nil
+            | _ -> raise (RuntimeError "incorrect usage of define")
+    )
+    | List (Atom "define" :: _) -> raise (RuntimeError "incorrect usage of define")
+    (* eval/apply *)
+    | List (hd::tl) -> apply env (eval env hd) (List.map tl ~f:(eval env))
+    | Atom x -> env_lookup env x
 
 let count_char c str =
     String.count str ~f:(fun x -> if phys_equal x c then true else false)
 
+exception SyntaxError of string
+
 let _ =
-    let debug = false in
-    let global = Hashtbl.create(module String) in
-    let _ = Hashtbl.set global ~key:"+" ~data:(Atom "+") in
-    let _ = Hashtbl.set global ~key:"-" ~data:(Atom "-") in
-    let _ = Hashtbl.set global ~key:"*" ~data:(Atom "*") in
-    let _ = Hashtbl.set global ~key:"/" ~data:(Atom "/") in
+    let debug = true in
+    let global = env_new None in
+    (* builtin functions *)
+    let _ = env_set global ~key:"+" ~data:(Atom "+") in
+    let _ = env_set global ~key:"-" ~data:(Atom "-") in
+    let _ = env_set global ~key:"*" ~data:(Atom "*") in
+    let _ = env_set global ~key:"/" ~data:(Atom "/") in
+    let _ = env_set global ~key:"<" ~data:(Atom "<") in
+    let _ = env_set global ~key:">" ~data:(Atom ">") in
+    let _ = env_set global ~key:"<" ~data:(Atom "<=") in
+    let _ = env_set global ~key:">=" ~data:(Atom ">=") in
+    let _ = env_set global ~key:"=" ~data:(Atom "=") in
+    let _ = env_set global ~key:"and" ~data:(Atom "and") in
+    let _ = env_set global ~key:"or" ~data:(Atom "or") in
+    let _ = env_set global ~key:"show" ~data:(Atom "show") in
+    let _ = env_set global ~key:"cons" ~data:(Atom "cons") in
+    let _ = env_set global ~key:"car" ~data:(Atom "car") in
+    let _ = env_set global ~key:"cdr" ~data:(Atom "cdr") in
     while true do
         try
             let buf = Buffer.create 16 in
@@ -133,17 +342,23 @@ let _ =
                 match In_channel.input_line stdin with
                 | Some input -> (
                     Buffer.add_string buf input;
-                    if phys_equal (count_char '(' (Buffer.contents buf)) (count_char ')' (Buffer.contents buf))
-                    then loop_over := true)
+                    let lps = count_char '(' (Buffer.contents buf) in
+                    let rps = count_char ')' (Buffer.contents buf) in
+                    if phys_equal lps rps then
+                        loop_over := true
+                    else if rps > lps then 
+                        raise (SyntaxError "too many right parentheses")
+                    )
                 | None -> loop_over := true
             done in
-            if debug then Caml.print_string (Buffer.contents buf);
+            (* if debug then print (Buffer.contents buf); *)
             let res = match parse (Buffer.contents buf) with
-                | Ok x -> if debug then Caml.print_string (show_lisp x); eval global x
+                | Ok x -> if debug then print (show_lisp x); eval global x
                 | Error msg -> String msg
             in
-            Out_channel.output_string stdout (show_lisp res ^ "\n");
-            Out_channel.flush stdout
+            print (" -> " ^ show_lisp res ^ "\n");
         with
         | RuntimeError msg -> print msg
+        | UndefinedIdentifier msg -> print msg
+        | SyntaxError msg -> print msg
     done
