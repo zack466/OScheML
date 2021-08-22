@@ -24,6 +24,7 @@ type lisp =
     | Boolean of bool
     | String of string
     | Quote of lisp
+    | Symbol of string
     | List of lisp list
     | Pair of lisp list (* must have only 2 items, unfortunate schism bc list by itself cannot tell the difference between (cons 1 2) and (cons 1 '(2)) *)
     | Lambda of lisp * environment ref (* extra variant just to store closure environment *)
@@ -80,6 +81,10 @@ let parse =
     parse_string ~consume:All lisp
 
 exception UndefinedIdentifier of string
+exception SyntaxError of string
+
+let count_char c str =
+    String.count str ~f:(fun x -> if phys_equal x c then true else false)
 
 let env_new parent =
     match parent with
@@ -152,6 +157,12 @@ let rec _or args =
     | Boolean x :: Boolean y :: [] -> x || y
     | Boolean x :: Boolean y :: xs -> if (x || y) then true else _or (Boolean y :: xs)
     | _ -> raise (RuntimeError "or can only be called on booleans")
+    
+let _not args =
+    match args with
+    | [] -> raise (RuntimeError "not requires 1 argument")
+    | [Boolean x] -> not x
+    | _ -> raise (RuntimeError "and can only be called on booleans")
 
 let rec lt args =
     match args with
@@ -241,7 +252,7 @@ let cdr (args: lisp list) =
 let rec apply (env: environment) (fn: lisp) (args: lisp list) =
     let _ = env in
     match fn with
-    (* builtins *)
+    (* builtins (forces arguments to be evaluated) *)
     | Atom "+" -> Number (sum args)
     | Atom "*" -> Number (prod args)
     | Atom "/" -> Number (div args)
@@ -253,6 +264,7 @@ let rec apply (env: environment) (fn: lisp) (args: lisp list) =
     | Atom "=" -> Boolean (eq args)
     | Atom "and" -> Boolean (_and args)
     | Atom "or" -> Boolean (_or args)
+    | Atom "not" -> Boolean (_not args)
     | Atom "show" -> show args; nil
     | Atom "cons" -> cons args
     | Atom "car" -> car args
@@ -277,8 +289,10 @@ and eval env ast =
     | Number x -> Number x
     | String x -> String x
     | Boolean x -> Boolean x
+    | Symbol x -> Symbol x
     | Pair x -> Pair x
     (* special forms *)
+    | Quote (Atom x) -> Symbol x
     | Quote x -> x
     | List (Atom "quote" :: List xs :: []) -> List xs
     | List (Atom "quote" :: Number xs :: []) -> Number xs
@@ -287,7 +301,8 @@ and eval env ast =
     | List (Atom "quote" :: _) -> raise (RuntimeError "incorrect usage of quote")
     | List (Atom "if" :: cond :: _then :: _else :: []) -> if (unbox_boolean (eval env cond)) then eval env _then else eval env _else
     | List (Atom "if" :: _) -> raise (RuntimeError "incorrect usage of if")
-    | List (Atom "cond" :: List (x :: y :: []) :: xs) -> if unbox_boolean (eval env x) then eval env y else eval env (List [Atom "cond" :: xs]) (* TODO *)
+    | List (Atom "cond" :: List (Atom "else" :: y :: []) :: _) -> eval env y
+    | List (Atom "cond" :: List (x :: y :: []) :: xs) -> if unbox_boolean (eval env x) then eval env y else eval env (List (Atom "cond" :: xs))
     | List (Atom "lambda" :: _) as x -> Lambda (x, ref env) (* special Lambda variant to hold both lambda and closure *)
     | Lambda (_, _) as x -> x
     | List (Atom "begin" :: exprs) ->
@@ -307,13 +322,10 @@ and eval env ast =
     )
     | List (Atom "define" :: _) -> raise (RuntimeError "incorrect usage of define")
     (* eval/apply *)
-    | List (hd::tl) -> apply env (eval env hd) (List.map tl ~f:(eval env))
+    | List (hd::tl) -> apply env (eval env hd) tl
     | Atom x -> env_lookup env x
 
-let count_char c str =
-    String.count str ~f:(fun x -> if phys_equal x c then true else false)
 
-exception SyntaxError of string
 
 let _ =
     let debug = true in
@@ -330,6 +342,7 @@ let _ =
     let _ = env_set global ~key:"=" ~data:(Atom "=") in
     let _ = env_set global ~key:"and" ~data:(Atom "and") in
     let _ = env_set global ~key:"or" ~data:(Atom "or") in
+    let _ = env_set global ~key:"not" ~data:(Atom "not") in
     let _ = env_set global ~key:"show" ~data:(Atom "show") in
     let _ = env_set global ~key:"cons" ~data:(Atom "cons") in
     let _ = env_set global ~key:"car" ~data:(Atom "car") in

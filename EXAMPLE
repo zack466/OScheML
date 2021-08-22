@@ -64,3 +64,7 @@ essentially lazy evaluation
 delay/force, comment/evaluate
 
 c-expr - the comment expression
+
+(define (square x) (* the square of x *))
+(define y (* the mass of the sun *))
+
