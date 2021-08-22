@@ -208,6 +208,19 @@ let rec eq args =
     | String x :: String y :: xs -> (String.(=) x y) && eq (String y :: xs)
     | _ -> raise (RuntimeError "= only supports arguments of the same type")
 
+let rec equal args =
+    match args with
+    | [] -> raise (RuntimeError "equal? requires at least 2 arguments")
+    | [_] -> raise (RuntimeError "equal? requires at least 2 arguments")
+    | Boolean x :: Boolean y :: [] -> Bool.(=) x y
+    | Symbol x :: Symbol y :: [] -> String.(=) x y
+    | Number x :: Number y :: [] -> Float.(=) x y
+    | List [] :: List [] :: [] -> true
+    | String x :: String y :: [] -> String.(=) x y
+    | Pair x :: Pair y :: [] -> List.equal (fun a -> fun b -> equal [a; b] ) x y
+    | List x :: List y :: [] -> List.equal (fun a -> fun b -> equal [a; b] ) x y
+    | _ -> false
+
 let unbox_atom x =
     match x with
     | Atom x -> x
@@ -221,11 +234,6 @@ let map l f =
     match l with
     | List x -> List (List.map x ~f:f)
     | _ -> raise (RuntimeError "Cannot map non-list types")
-
-let is_list x = 
-    match x with
-    | List _ -> true
-    | _ -> false
 
 let show args =
     List.iter args ~f:(fun x -> print (show_lisp x))
@@ -249,6 +257,49 @@ let cdr (args: lisp list) =
     | [List []] -> raise (RuntimeError "Illegal datum")
     | _ -> raise (RuntimeError "cdr requires exactly 1 argument")
 
+let is_number args =
+    match args with
+    | [] -> raise (RuntimeError "number? requires exactly 1 argument")
+    | [Number _] -> true
+    | _ -> false
+
+let is_boolean args =
+    match args with
+    | [] -> raise (RuntimeError "boolean? requires exactly 1 argument")
+    | [Boolean _] -> true
+    | _ -> false
+
+let is_string args =
+    match args with
+    | [] -> raise (RuntimeError "string? requires exactly 1 argument")
+    | [String _] -> true
+    | _ -> false
+
+let is_symbol args =
+    match args with
+    | [] -> raise (RuntimeError "symbol? requires exactly 1 argument")
+    | [Symbol _] -> true
+    | _ -> false
+
+let is_pair args =
+    match args with
+    | [] -> raise (RuntimeError "pair? requires exactly 1 argument")
+    | [Pair _] -> true
+    | [List _] -> true
+    | _ -> false
+
+let is_null args =
+    match args with
+    | [] -> raise (RuntimeError "null? requires exactly 1 argument")
+    | [List []] -> true
+    | _ -> false
+
+let is_list args =
+    match args with
+    | [] -> raise (RuntimeError "list? requires exactly 1 argument")
+    | [List _] -> true
+    | _ -> false
+
 let rec apply (env: environment) (fn: lisp) (args: lisp list) =
     let _ = env in
     match fn with
@@ -269,6 +320,14 @@ let rec apply (env: environment) (fn: lisp) (args: lisp list) =
     | Atom "cons" -> cons args
     | Atom "car" -> car args
     | Atom "cdr" -> cdr args
+    | Atom "equal?" -> Boolean (equal args)
+    | Atom "number?" -> Boolean (is_number args)
+    | Atom "boolean?" -> Boolean (is_boolean args)
+    | Atom "string?" -> Boolean (is_string args)
+    | Atom "symbol?" -> Boolean (is_symbol args)
+    | Atom "pair?" -> Boolean (is_pair args)
+    | Atom "null?" -> Boolean (is_null args)
+    | Atom "list?" -> Boolean (is_list args)
     | Lambda (List (Atom "lambda" :: List formals :: List definition :: []), closure) -> (
         (* applies a lambda by defining each formal parameter as its corresponding arguments in a new child environment
             and then evaluating it like normal *)
@@ -292,7 +351,7 @@ and eval env ast =
     | Symbol x -> Symbol x
     | Pair x -> Pair x
     (* special forms *)
-    | Quote (Atom x) -> Symbol x
+    | Quote (Atom x) -> Symbol (String.lowercase x)
     | Quote x -> x
     | List (Atom "quote" :: List xs :: []) -> List xs
     | List (Atom "quote" :: Number xs :: []) -> Number xs
@@ -322,10 +381,10 @@ and eval env ast =
     )
     | List (Atom "define" :: _) -> raise (RuntimeError "incorrect usage of define")
     (* eval/apply *)
-    | List (hd::tl) -> apply env (eval env hd) tl
+    | List (hd::tl) -> apply env (eval env hd) (List.map tl ~f:(eval env))
     | Atom x -> env_lookup env x
 
-
+exception EndOfInput
 
 let _ =
     let debug = true in
@@ -347,7 +406,16 @@ let _ =
     let _ = env_set global ~key:"cons" ~data:(Atom "cons") in
     let _ = env_set global ~key:"car" ~data:(Atom "car") in
     let _ = env_set global ~key:"cdr" ~data:(Atom "cdr") in
-    while true do
+    let _ = env_set global ~key:"equal?" ~data:(Atom "equal?") in
+    let _ = env_set global ~key:"number?" ~data:(Atom "number?") in
+    let _ = env_set global ~key:"boolean?" ~data:(Atom "boolean?") in
+    let _ = env_set global ~key:"string?" ~data:(Atom "string?") in
+    let _ = env_set global ~key:"symbol?" ~data:(Atom "symbol?") in
+    let _ = env_set global ~key:"pair?" ~data:(Atom "pair?") in
+    let _ = env_set global ~key:"null?" ~data:(Atom "null?") in
+    let _ = env_set global ~key:"list?" ~data:(Atom "list?") in
+    let over = ref false in
+    while not !over do
         try
             let buf = Buffer.create 16 in
             let loop_over = ref false in
@@ -362,7 +430,7 @@ let _ =
                     else if rps > lps then 
                         raise (SyntaxError "too many right parentheses")
                     )
-                | None -> loop_over := true
+                | None -> raise EndOfInput
             done in
             (* if debug then print (Buffer.contents buf); *)
             let res = match parse (Buffer.contents buf) with
@@ -374,4 +442,6 @@ let _ =
         | RuntimeError msg -> print msg
         | UndefinedIdentifier msg -> print msg
         | SyntaxError msg -> print msg
-    done
+        | EndOfInput -> over := true
+    done;
+    print "Goodbye!"
