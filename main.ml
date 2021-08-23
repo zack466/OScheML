@@ -68,7 +68,6 @@ let parse =
       | '\x20' | '\x0a' | '\x0d' | '\x09' -> true
       | _ -> false) in
 
-    (* this function has broken my soul *)
     let lisp = fix (fun lisp ->
         let ele = choice [num; string; boolean_true; boolean_false; atom] in
         let list = lp *> many (ws *> lisp <* ws) <* rp >>| fun x -> List x in
@@ -300,6 +299,12 @@ let is_list args =
     | [List _] -> true
     | _ -> false
 
+let is_proc args =
+    match args with
+    | [] -> raise (RuntimeError "list? requires exactly 1 argument")
+    | Lambda (_, _) :: _ -> true
+    | _ -> false
+
 let rec apply (env: environment) (fn: lisp) (args: lisp list) =
     let _ = env in
     match fn with
@@ -328,6 +333,11 @@ let rec apply (env: environment) (fn: lisp) (args: lisp list) =
     | Atom "pair?" -> Boolean (is_pair args)
     | Atom "null?" -> Boolean (is_null args)
     | Atom "list?" -> Boolean (is_list args)
+    | Atom "procedure?" -> Boolean (is_proc args)
+    | Atom "apply" -> (match args with
+                        | x :: xs -> apply env x xs
+                        | [] -> raise (RuntimeError "invalid apply")
+    )
     | Lambda (List (Atom "lambda" :: List formals :: List definition :: []), closure) -> (
         (* applies a lambda by defining each formal parameter as its corresponding arguments in a new child environment
             and then evaluating it like normal *)
@@ -414,6 +424,8 @@ let _ =
     let _ = env_set global ~key:"pair?" ~data:(Atom "pair?") in
     let _ = env_set global ~key:"null?" ~data:(Atom "null?") in
     let _ = env_set global ~key:"list?" ~data:(Atom "list?") in
+    let _ = env_set global ~key:"procedure?" ~data:(Atom "procedure?") in
+    let _ = env_set global ~key:"apply" ~data:(Atom "apply") in
     let over = ref false in
     while not !over do
         try
