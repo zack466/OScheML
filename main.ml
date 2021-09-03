@@ -10,7 +10,7 @@ module Hashtbl_printable = struct
       let _ = pp_value in
       let _ = ppf in
       let _ = values in
-      () (* not actually printing anything bc results in stack overflow *)
+      () (* not actually printing anything bc might result in stack overflow *)
 end
 
 let print str =
@@ -18,7 +18,19 @@ let print str =
     Out_channel.output_string stdout "\n";
     Out_channel.flush stdout;
 
-type lisp = 
+(* Syntactic sugar is run on this parse tree *)
+type lisp_parse =
+    | Identifier of string
+    | IntegerLiteral of int
+    | FloatLiteral of float
+    | BooleanLiteral of bool
+    | StringLiteral of string
+    | Quote of lisp_parse
+    | List of lisp_parse list
+[@@deriving show]
+
+(* The AST for this lisp *)
+(* type lisp = 
     | Atom of string
     | Number of float
     | Boolean of bool
@@ -29,7 +41,37 @@ type lisp =
     | Pair of lisp list (* must have only 2 items, unfortunate schism bc list by itself cannot tell the difference between (cons 1 2) and (cons 1 '(2)) *)
     | Lambda of lisp * environment ref (* extra variant just to store closure environment *)
 and environment = | Env of environment ref option * (string, lisp) Hashtbl_printable.t
-[@@deriving show]
+[@@deriving show] *)
+
+type primitive_value =
+    | Number of numerical_value
+    | Boolean of bool
+    | Symbol of string
+    | Char of char
+and numerical_value =
+    | Int of int
+    | Float of float
+
+type lisp =
+    | Object of reference_value ref
+    | Primitive of primitive_value
+and reference_value =
+    | Pair of pair
+    | Vector of lisp Array.t
+    | String of string
+and pair =
+    | Nil
+    | Cons of lisp * lisp
+
+let is_exact = function
+    | Int _ -> true
+    | Float _ -> false
+
+type env = {
+    parent: env ref;
+    value: (string, lisp) Hashtbl_printable.t
+}
+
 
 let nil = List []
 
