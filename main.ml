@@ -93,7 +93,7 @@ let parse =
 (* the abstract syntax tree representation for this lisp *)
 type lisp =
     (* A reference type, which resides in a location in memory *)
-    | Object of reference
+    | Object of {is_mutable: bool; value: reference_value ref}
 
     (* Primitives are immutable and reside on the stack (at least, behavior-wise) *)
     | Integer of int
@@ -116,14 +116,6 @@ and builtin =
     | Car of lisp
     | Cons of lisp
 
-and reference = {
-    (* Ex: (symbol->string 'asdf) returns an immutable string "asdf".
-       Assigning to immutable values is an error. *)
-    is_mutable: bool;
-
-    (* Holds the actual reference to a location in memory *)
-    value: reference_value ref
-}
 and reference_value =
     (* Homebrewed linked list *)
     | Pair of pair
@@ -134,14 +126,13 @@ and reference_value =
     | String of string
 
     (* a procedure, which holds both a closure and the procedure itself *)
-    | Lambda of env * lisp
+    (* | Lambda of env * lisp *)
 
-and pair = Nil | ( :: ) of lisp * lisp
-and env = {
+and pair = Nil | CC of lisp * lisp
+(* and env = {
     parent: env ref option;
     hashtbl: (string, lisp) Hashtbl_printable.t
-}
-[@@deriving show]
+} *)
 
 (* let is_exact = function
     | Int _ -> true
@@ -156,10 +147,54 @@ let rec actualize (parse_tree: lisp_parse): lisp =
     | BooleanLiteral x -> Boolean x
     | StringLiteral x -> Object { is_mutable = false; value = ref (String x) }
     | Quote x -> Quote (actualize x)
-    | List _ -> Object {
-        is_mutable = false;
-        value = ref (Pair Nil)
-    }
+    | List x -> (
+        match x with
+        | [] ->
+                Object {
+                    is_mutable = true;
+                    value = ref (Pair Nil);
+                }
+        | hd :: tl ->
+                Object {
+                    is_mutable = true;
+                    value = ref (Pair (CC ((actualize hd), (actualize (List tl)))));
+                }
+
+    )
+
+let rec is_proper_list (ls: lisp) =
+    match ls with
+    | Object {is_mutable = _; value = { contents = (Pair Nil) } } -> true
+    | Object {is_mutable = _; value = { contents = (Pair (CC (_, tl))) } } -> is_proper_list tl
+    | _ -> false
+
+let rec to_list (ls: lisp) =
+    match ls with
+    | Object {is_mutable = _; value = { contents = (Pair Nil) } } -> []
+    | Object {is_mutable = _; value = { contents = (Pair (CC (hd, tl))) } } -> hd :: to_list tl
+    | _ -> assert false
+
+let rec show_lisp (ast: lisp) =
+    match ast with
+    | list when is_proper_list list -> "(" ^ String.concat ~sep:" " (List.map (to_list list) ~f:show_lisp) ^ ")"
+    | Object {is_mutable = _; value = y} -> show_reference_value !y
+
+    (* Primitives are immutable and reside on the stack (at least, behavior-wise) *)
+    | Integer x -> Int.to_string x
+    | Float x -> Float.to_string x
+    | Boolean x -> Bool.to_string x
+    | Symbol x -> "'" ^ x
+    | Char x -> Char.to_string x
+    | Variable x -> x
+    | Quote x -> "'" ^ (show_lisp x)
+
+    (* builtin "functions" / special forms *)
+    | Builtin _ -> "Builtin function"
+and show_reference_value rv =
+    match rv with
+    | Pair Nil -> "()"
+    | Pair (CC (a, b)) -> "(" ^ (show_lisp a) ^ " . " ^ (show_lisp b) ^ ")"
+    | String x -> "\"" ^ x ^ "\""
 
 (* REPL *)
 exception SyntaxError of string
@@ -187,10 +222,9 @@ let _ =
                     )
                 | None -> raise EndOfInput
             done in
-            print (Buffer.contents buf);
             match parse (Buffer.contents buf) with
             | Ok res -> (
-                print (show_lisp_parse res);
+                (* print (show_lisp_parse res); *)
                 let ast = actualize res in
                 print (show_lisp ast);
             )
