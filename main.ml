@@ -1,6 +1,23 @@
 open Base
 open Stdio
 
+(* 
+   ARCHITECTURE:
+       input -> parse -> actualize -> (interpret | compile)
+
+       A string input is parsed into a parse tree (a bit more useful than tokenization),
+       which is then converted to a full abstract syntax tree (AST), which can then be
+       either interpreted with a tree-walk or compiled into bytecode.
+ *)
+
+(*
+    REFERENCES:
+        - Revised^7 Report on the Algorithmic Language Scheme
+        - Structure and Interpretation of Computer Programs
+        - Crafting Interpreters
+        - random blog posts on the internet on the implementation of Lisps
+*)
+
 module Hashtbl_printable = struct
   type ('k,'s) t = ('k, 's) Hashtbl.t
 
@@ -112,9 +129,10 @@ and builtin =
 
     (* set! - (set! <variable> <expression> )*)
     | Set of lisp * lisp
-
-    | Car of lisp
-    | Cons of lisp
+    
+    | And of lisp
+    | Or of lisp
+    | Begin of lisp list
 
 and reference_value =
     (* Homebrewed linked list *)
@@ -139,21 +157,44 @@ and pair = Nil | CC of lisp * lisp
     | Float _ -> false
     | _ -> assert false *)
 
+exception SyntaxError of string
+
+let is_syntactic_keyword = function
+    | "and" | "or" | "set!"
+    | "if" | "lambda" | "begin" -> true
+    | _ -> false
+
 let rec actualize (parse_tree: lisp_parse): lisp =
     match parse_tree with
+    | Atom x when is_syntactic_keyword x -> raise (SyntaxError ("Syntactic keyword '" ^ x ^ "' cannot be used as an expression"))
     | Atom x -> Variable x
     | IntegerLiteral x -> Integer x
     | FloatLiteral x -> Float x
     | BooleanLiteral x -> Boolean x
-    | StringLiteral x -> Object { is_mutable = false; value = ref (String x) }
+    | StringLiteral x -> Object { is_mutable = true; value = ref (String x) }
+
+    (* quoting and symbols *)
+    | Quote (StringLiteral x) -> Symbol x
     | Quote x -> Quote (actualize x)
     | List x -> (
         match x with
+        (* Empty list *)
         | [] ->
                 Object {
                     is_mutable = true;
                     value = ref (Pair Nil);
                 }
+
+        (* parsing pairs with dot notation *)
+        | hd :: Atom "." :: tl :: [] ->
+                Object {
+                    is_mutable = true;
+                    value = ref (Pair (CC ((actualize hd), (actualize tl))));
+                }
+        | _ :: Atom "." :: _ ->
+                raise (SyntaxError "Incorrect usage of . notation")
+
+        (* Otherwise, a standard list *)
         | hd :: tl ->
                 Object {
                     is_mutable = true;
@@ -197,7 +238,6 @@ and show_reference_value rv =
     | String x -> "\"" ^ x ^ "\""
 
 (* REPL *)
-exception SyntaxError of string
 exception EndOfInput
 
 let count_char c str =
