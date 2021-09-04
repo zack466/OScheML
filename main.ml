@@ -20,7 +20,7 @@ let print str =
 
 (* Syntactic sugar is run on this parse tree *)
 type lisp_parse =
-    | Identifier of string
+    | Atom of string
     | IntegerLiteral of int
     | FloatLiteral of float
     | BooleanLiteral of bool
@@ -43,38 +43,7 @@ type lisp_parse =
 and environment = | Env of environment ref option * (string, lisp) Hashtbl_printable.t
 [@@deriving show] *)
 
-type primitive_value =
-    | Number of numerical_value
-    | Boolean of bool
-    | Symbol of string
-    | Char of char
-and numerical_value =
-    | Int of int
-    | Float of float
-
-type lisp =
-    | Object of reference_value ref
-    | Primitive of primitive_value
-and reference_value =
-    | Pair of pair
-    | Vector of lisp Array.t
-    | String of string
-and pair =
-    | Nil
-    | Cons of lisp * lisp
-
-let is_exact = function
-    | Int _ -> true
-    | Float _ -> false
-
-type env = {
-    parent: env ref;
-    value: (string, lisp) Hashtbl_printable.t
-}
-
-
-let nil = List []
-
+(* Returns a parse tree of type lisp_parse *)
 let parse = 
     let open Angstrom in
 
@@ -88,20 +57,20 @@ let parse =
             | '(' | ')' | ':' | ',' -> false
             | _ -> true)
         >>= fun s ->
-        try return (Number (Float.of_string s))
+        try return (FloatLiteral (Float.of_string s))
         with _ -> fail "invalid number literal" in
 
     let string =
         char '"' *> take_while1 (function '"' -> false | _ -> true) <* char '"' <?> "string literal"
-        >>| fun x -> String x in
+        >>| fun x -> StringLiteral x in
     
     let boolean_true =
         Angstrom.string "#t" <?> "boolean literal"
-        >>| fun _ -> Boolean true in
+        >>| fun _ -> BooleanLiteral true in
 
     let boolean_false =
         Angstrom.string "#f" <?> "boolean literal"
-        >>| fun _ -> Boolean false in
+        >>| fun _ -> BooleanLiteral false in
 
     let atom = take_while1 (function ' ' | '(' | ')' | '\'' | '"' -> false | _ -> true) <?> "atom"
         >>| fun x -> Atom x in
@@ -121,11 +90,119 @@ let parse =
 
     parse_string ~consume:All lisp
 
-exception UndefinedIdentifier of string
+(* the abstract syntax tree representation for this lisp *)
+type lisp =
+    (* A reference type, which resides in a location in memory *)
+    | Object of reference
+
+    (* Primitives are immutable and reside on the stack (at least, behavior-wise) *)
+    | Integer of int
+    | Float of float
+    | Boolean of bool
+    | Symbol of string
+    | Char of char
+    | Variable of string
+    | Quote of lisp
+
+    (* builtin "functions" / special forms *)
+    | Builtin of builtin
+and builtin =
+    (* conditional - (if <test> <consequent> [alternate] )*)
+    | If of lisp * lisp * lisp option
+
+    (* set! - (set! <variable> <expression> )*)
+    | Set of lisp * lisp
+
+    | Car of lisp
+    | Cons of lisp
+
+and reference = {
+    (* Ex: (symbol->string 'asdf) returns an immutable string "asdf".
+       Assigning to immutable values is an error. *)
+    is_mutable: bool;
+
+    (* Holds the actual reference to a location in memory *)
+    value: reference_value ref
+}
+and reference_value =
+    (* Homebrewed linked list *)
+    | Pair of pair
+
+    (* | Vector of lisp Array.t *)
+
+    (* a string *)
+    | String of string
+
+    (* a procedure, which holds both a closure and the procedure itself *)
+    | Lambda of env * lisp
+
+and pair = Nil | ( :: ) of lisp * lisp
+and env = {
+    parent: env ref option;
+    hashtbl: (string, lisp) Hashtbl_printable.t
+}
+[@@deriving show]
+
+(* let is_exact = function
+    | Int _ -> true
+    | Float _ -> false
+    | _ -> assert false *)
+
+let rec actualize (parse_tree: lisp_parse): lisp =
+    match parse_tree with
+    | Atom x -> Variable x
+    | IntegerLiteral x -> Integer x
+    | FloatLiteral x -> Float x
+    | BooleanLiteral x -> Boolean x
+    | StringLiteral x -> Object { is_mutable = false; value = ref (String x) }
+    | Quote x -> Quote (actualize x)
+    | List _ -> Object {
+        is_mutable = false;
+        value = ref (Pair Nil)
+    }
+
+(* REPL *)
 exception SyntaxError of string
+exception EndOfInput
 
 let count_char c str =
     String.count str ~f:(fun x -> if phys_equal x c then true else false)
+
+let _ = 
+    let over = ref false in
+    while not !over do
+        try
+            let buf = Buffer.create 16 in
+            let loop_over = ref false in
+            let _ = while not !loop_over do
+                match In_channel.input_line stdin with
+                | Some input -> (
+                    Buffer.add_string buf input;
+                    let lps = count_char '(' (Buffer.contents buf) in
+                    let rps = count_char ')' (Buffer.contents buf) in
+                    if phys_equal lps rps then
+                        loop_over := true
+                    else if rps > lps then 
+                        raise (SyntaxError "too many right parentheses")
+                    )
+                | None -> raise EndOfInput
+            done in
+            print (Buffer.contents buf);
+            match parse (Buffer.contents buf) with
+            | Ok res -> (
+                print (show_lisp_parse res);
+                let ast = actualize res in
+                print (show_lisp ast);
+            )
+            | Error msg -> print msg;
+            ;
+        with
+        | SyntaxError msg -> print msg
+        | EndOfInput -> over := true
+    done;
+
+(* exception UndefinedIdentifier of string
+
 
 let env_new parent =
     match parent with
@@ -436,7 +513,6 @@ and eval env ast =
     | List (hd::tl) -> apply env (eval env hd) (List.map tl ~f:(eval env))
     | Atom x -> env_lookup env x
 
-exception EndOfInput
 
 let _ =
     let debug = true in
@@ -498,4 +574,4 @@ let _ =
         | SyntaxError msg -> print msg
         | EndOfInput -> over := true
     done;
-    print "Goodbye!"
+    print "Goodbye!" *)
