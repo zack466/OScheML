@@ -242,7 +242,7 @@ let rec show_lisp (ast: lisp) =
 and show_reference_value rv =
     match rv with
     | Lambda (_, _) -> "Compound procedure"
-    | Builtin f -> "Builtin procedure"
+    | Builtin _ -> "Builtin procedure"
     | Pair Nil -> "()"
     | Pair (CC (a, b)) -> "(" ^ (show_lisp a) ^ " . " ^ (show_lisp b) ^ ")"
     | String x -> "\"" ^ x ^ "\""
@@ -250,36 +250,52 @@ and show_reference_value rv =
 (* Eval / Apply *)
 exception RuntimeError of string
 
-let rec lookup (env: environment) (Symbol name) =
-    match env with
-    (* root environment *)
-    | { parent = None; table = t } -> (
-        match Hashtbl.find t name with
-        | None -> raise (RuntimeError ("Unbound variable" ^ name))
-        | Some value -> value
+let rec env_lookup (env: environment) symbol =
+    match symbol with
+    | Symbol name -> (
+        match env with
+        (* root environment *)
+        | { parent = None; table = t } -> (
+            match Hashtbl.find t name with
+            | None -> raise (RuntimeError ("Unbound variable " ^ name))
+            | Some value -> value
+        )
+        | { parent = Some p; table = t } -> (
+            match Hashtbl.find t name with
+            | None -> env_lookup !p (Symbol name)
+            | Some value -> value
+        )
     )
-    | { parent = Some p; table = t } -> (
-        match Hashtbl.find t name with
-        | None -> lookup !p (Symbol name)
-        | Some value -> value
+    | _ -> raise (RuntimeError "cannot lookup a non-symbol")
+
+let is_undefined (env: environment) symbol: bool =
+    match symbol with
+    | Symbol name -> (
+        try
+            match env_lookup env (Symbol name) with
+            | _ -> true
+        with
+        | RuntimeError _ -> false
     )
+    | _ -> raise (RuntimeError "cannot lookup a non-symbol")
 
-let is_undefined (env: environment) (Symbol name): bool =
-    try
-        match lookup env (Symbol name) with
-        | _ -> true
-    with
-    | RuntimeError _ -> false
+let car list =
+    match list with
+    | (Object { contents = {is_mutable = _; value = Pair p} }) -> (
+        match p with
+        | Nil -> raise (RuntimeError "cannot take car of an empty list")
+        | (CC (hd, _)) -> hd
+    )
+    | _ -> raise (RuntimeError "cannot take the car of this object")
 
-let car (Object { contents = {is_mutable = _; value = Pair p} }) =
-    match p with
-    | Nil -> raise (RuntimeError "cannot take car of an empty list")
-    | (CC (hd, _)) -> hd
-
-let cdr (Object { contents = {is_mutable = _; value = Pair p} }) =
-    match p with
-    | Nil -> raise (RuntimeError "cannot take cdr of an empty list")
-    | (CC (_, tl)) -> tl
+let cdr list =
+    match list with
+    | (Object { contents = {is_mutable = _; value = Pair p} }) -> (
+        match p with
+        | Nil -> raise (RuntimeError "cannot take cdr of an empty list")
+        | (CC (_, tl)) -> tl
+    )
+    | _ -> raise (RuntimeError "cannot take the cdr of this object")
 
 let cadr = Fn.compose car cdr
 let cddr = Fn.compose cdr cdr
@@ -294,6 +310,23 @@ let is_symbol x =
     | Symbol _ -> true
     | _ -> false
 
+let env_new parent =
+    match parent with
+    | Some parent_env -> { parent = Some (ref parent_env); table = Hashtbl.create(module String) }
+    | None -> { parent = None; table = Hashtbl.create(module String) }
+
+let env_set env ~key ~data =
+    match env with
+    | { parent = _; table = hashtbl } -> Hashtbl.set hashtbl ~key:key ~data:data
+
+let rec map_list ~f list =
+    match list with
+    | Object { contents = { is_mutable = _; value = Pair Nil } } as null -> null
+    | Object { contents = { is_mutable = m; value = Pair (CC (hd, tl)) } } -> (
+        Object (ref { is_mutable = m; value = Pair (CC ((f hd), map_list ~f:f tl)) } )
+    )
+    | _ -> raise (RuntimeError "Cannot call map on non-lists")
+
 let rec eval (env: environment) (ast: lisp): lisp = 
     match ast with
     (* Primitive values evaluate to themselves *)
@@ -301,7 +334,7 @@ let rec eval (env: environment) (ast: lisp): lisp =
     | Float x -> Float x
     | Boolean x -> Boolean x
     | Char x -> Char x
-    | Symbol x -> lookup env (Symbol x)
+    | Symbol x -> env_lookup env (Symbol x)
     | Quote x -> x
 
     (*** Object types ***)
@@ -341,9 +374,12 @@ let rec eval (env: environment) (ast: lisp): lisp =
             )
 
     (* all other procedure calls *)
-    | Object { contents = { is_mutable = _; value = Pair (CC (hd, tl)) } } -> apply env hd tl
+    | Object { contents = { is_mutable = _; value = Pair (CC (hd, tl)) } } -> (
+        apply env (eval env hd) (map_list ~f:(eval env) tl)
+    )
 
 and apply (env: environment) procedure args =
+    print ("Calling " ^ (show_lisp procedure) ^ "on " ^ (show_lisp args));
     match procedure with
     | Object { contents = { is_mutable = _; value = Builtin f} } -> f args
     | Object { contents = { is_mutable = _; value = Lambda (closure, lambda)} } -> (
@@ -352,35 +388,46 @@ and apply (env: environment) procedure args =
         if is_null formals then
             eval env body
         else
-            let new_table = Hashtbl.create(module String) in
-            let new_env =  { parent = Some (ref closure); table = new_table } in
+            let new_env = env_new (Some closure) in
             let rec zip_args formals params func_env =
-                if is_null formals then
+                if is_null formals then (* Out of both formals and params *)
                     if is_null params then
-                        () (* done *)
+                        (* done *)
+                        ()
                     else
+                        (* still params remaining *)
                         raise (RuntimeError "Procedure called with too many arguments")
-                else if is_symbol formals (* when last argument is dotted *)
-                    
-                    
-                if (not (is_null formals)) && (not (is_null params)) then
+                else if is_symbol formals then (* when last argument is dotted *)
+                    match formals with
+                    | Symbol name -> (
+                        env_set func_env ~key:name ~data:params
+                    )
+                    | _ -> assert false
+                else
                     let _ = match (car formals) with
                     | Symbol name -> (
-                        Hashtbl.set func_env ~key:name ~data:(car params)
+                        try
+                            let p = car params in
+                            env_set func_env ~key:name ~data:p
+                        with
+                        | RuntimeError _ -> raise (RuntimeError "Procedure called with too few arguments")
                     )
                     | _ -> raise (SyntaxError "Invalid argument syntax")
                     in
                     zip_args (cdr formals) (cdr params) func_env
             in
-            let _ = zip_args formals args new_table in
+            let _ = zip_args formals args new_env in
             eval new_env body
     )
+    | x -> raise (RuntimeError ((show_lisp x) ^ " cannot be applied"))
 
 (* REPL *)
 exception EndOfInput
 
 let count_char c str =
     String.count str ~f:(fun x -> if phys_equal x c then true else false)
+
+let global_env = env_new None
 
 let _ = 
     let over = ref false in
@@ -406,6 +453,12 @@ let _ =
                 (* print (show_lisp_parse res); *)
                 let ast = actualize res in
                 print (show_lisp ast);
+                try
+                    let result = eval global_env ast in
+                    print (show_lisp result)
+                with
+                | RuntimeError msg -> print ("RuntimeError: " ^ msg)
+                | SyntaxError msg -> print ("SyntaxError: " ^ msg)
             )
             | Error msg -> print msg;
             ;
