@@ -110,29 +110,27 @@ let parse =
 (* the abstract syntax tree representation for this lisp *)
 type lisp =
     (* A reference type, which resides in a location in memory *)
-    | Object of {is_mutable: bool; value: reference_value ref}
+    | Object of reference ref
 
-    (* Primitives are immutable and reside on the stack (at least, behavior-wise) *)
+    (* Primitive expressions/values *)
     | Integer of int
     | Float of float
     | Boolean of bool
     | Symbol of string
     | Char of char
-    | Variable of string
     | Quote of lisp
 
-    (* builtin "functions" / special forms *)
-    | Builtin of builtin
-and builtin =
+    (* (* builtin "functions" / special forms *)
     (* conditional - (if <test> <consequent> [alternate] )*)
-    | If of lisp * lisp * lisp option
+    | If of lisp
 
     (* set! - (set! <variable> <expression> )*)
-    | Set of lisp * lisp
+    | Set of lisp
     
     | And of lisp
     | Or of lisp
-    | Begin of lisp list
+    | Begin of lisp *)
+and reference = {is_mutable: bool; value: reference_value}
 
 and reference_value =
     (* Homebrewed linked list *)
@@ -143,14 +141,17 @@ and reference_value =
     (* a string *)
     | String of string
 
-    (* a procedure, which holds both a closure and the procedure itself *)
-    (* | Lambda of env * lisp *)
+    (* a compound procedure, which holds both a closure and the procedure itself *)
+    | Lambda of environment * lisp
+
+    (* a builtin procedure, which can only be accessed from the initial environment *)
+    | Builtin of (lisp -> lisp)
 
 and pair = Nil | CC of lisp * lisp
-(* and env = {
-    parent: env ref option;
-    hashtbl: (string, lisp) Hashtbl_printable.t
-} *)
+and environment = {
+    parent: environment ref option;
+    table: (string, lisp) Hashtbl_printable.t
+}
 
 (* let is_exact = function
     | Int _ -> true
@@ -164,78 +165,189 @@ let is_syntactic_keyword = function
     | "if" | "lambda" | "begin" -> true
     | _ -> false
 
+let _null = { is_mutable = false; value = Pair Nil }
+
+let null = Object (ref _null)
+
 let rec actualize (parse_tree: lisp_parse): lisp =
     match parse_tree with
-    | Atom x when is_syntactic_keyword x -> raise (SyntaxError ("Syntactic keyword '" ^ x ^ "' cannot be used as an expression"))
-    | Atom x -> Variable x
+    (* | Atom x when is_syntactic_keyword x -> raise (SyntaxError ("Syntactic keyword '" ^ x ^ "' cannot be used as an expression")) *)
+    | Atom x -> Symbol x
     | IntegerLiteral x -> Integer x
     | FloatLiteral x -> Float x
     | BooleanLiteral x -> Boolean x
-    | StringLiteral x -> Object { is_mutable = true; value = ref (String x) }
 
-    (* quoting and symbols *)
-    | Quote (StringLiteral x) -> Symbol x
+    (* string constants are not mutable *)
+    | StringLiteral x -> Object (ref { is_mutable = false; value = String x })
+
     | Quote x -> Quote (actualize x)
+
     | List x -> (
         match x with
         (* Empty list *)
-        | [] ->
-                Object {
-                    is_mutable = true;
-                    value = ref (Pair Nil);
-                }
+        | [] -> null
 
         (* parsing pairs with dot notation *)
         | hd :: Atom "." :: tl :: [] ->
-                Object {
+                Object (ref {
                     is_mutable = true;
-                    value = ref (Pair (CC ((actualize hd), (actualize tl))));
-                }
+                    value = Pair (CC ((actualize hd), (actualize tl)));
+                })
         | _ :: Atom "." :: _ ->
                 raise (SyntaxError "Incorrect usage of . notation")
 
+        (* special forms *)
+        (* | Atom "if" :: tl -> If (Object { is_mutable = true; value = ref (Pair (CC ((Symbol "if"), (actualize (List tl)))))}) *)
+
         (* Otherwise, a standard list *)
         | hd :: tl ->
-                Object {
+                Object (ref {
                     is_mutable = true;
-                    value = ref (Pair (CC ((actualize hd), (actualize (List tl)))));
-                }
+                    value = Pair (CC ((actualize hd), (actualize (List tl))));
+        })
 
     )
 
 let rec is_proper_list (ls: lisp) =
     match ls with
-    | Object {is_mutable = _; value = { contents = (Pair Nil) } } -> true
-    | Object {is_mutable = _; value = { contents = (Pair (CC (_, tl))) } } -> is_proper_list tl
+    | Object {contents = {is_mutable = _; value = Pair Nil } } -> true
+    | Object {contents = {is_mutable = _; value = Pair (CC (_, tl)) } } -> is_proper_list tl
     | _ -> false
 
 let rec to_list (ls: lisp) =
     match ls with
-    | Object {is_mutable = _; value = { contents = (Pair Nil) } } -> []
-    | Object {is_mutable = _; value = { contents = (Pair (CC (hd, tl))) } } -> hd :: to_list tl
+    | Object {contents = {is_mutable = _; value = Pair Nil } } -> []
+    | Object {contents = {is_mutable = _; value = Pair (CC (hd, tl)) } } -> hd :: to_list tl
     | _ -> assert false
 
 let rec show_lisp (ast: lisp) =
     match ast with
     | list when is_proper_list list -> "(" ^ String.concat ~sep:" " (List.map (to_list list) ~f:show_lisp) ^ ")"
-    | Object {is_mutable = _; value = y} -> show_reference_value !y
+    | Object { contents = {is_mutable = _; value = y}} -> show_reference_value y
 
     (* Primitives are immutable and reside on the stack (at least, behavior-wise) *)
     | Integer x -> Int.to_string x
     | Float x -> Float.to_string x
     | Boolean x -> Bool.to_string x
-    | Symbol x -> "'" ^ x
+    | Symbol x -> x
     | Char x -> Char.to_string x
-    | Variable x -> x
     | Quote x -> "'" ^ (show_lisp x)
 
-    (* builtin "functions" / special forms *)
-    | Builtin _ -> "Builtin function"
+    (* builtin syntax / special forms *)
+    (* | If x -> show_lisp x
+    | Set x -> show_lisp x
+    | And x -> show_lisp x
+    | Or x -> show_lisp x
+    | Begin x -> show_lisp x *)
 and show_reference_value rv =
     match rv with
+    | Lambda (_, _) -> "Compound procedure"
+    | Builtin f -> "Builtin procedure"
     | Pair Nil -> "()"
     | Pair (CC (a, b)) -> "(" ^ (show_lisp a) ^ " . " ^ (show_lisp b) ^ ")"
     | String x -> "\"" ^ x ^ "\""
+
+(* Eval / Apply *)
+exception RuntimeError of string
+
+let rec lookup (env: environment) (Symbol name) =
+    match env with
+    (* root environment *)
+    | { parent = None; table = t } -> (
+        match Hashtbl.find t name with
+        | None -> raise (RuntimeError ("Unbound variable" ^ name))
+        | Some value -> value
+    )
+    | { parent = Some p; table = t } -> (
+        match Hashtbl.find t name with
+        | None -> lookup !p (Symbol name)
+        | Some value -> value
+    )
+
+let is_undefined (env: environment) (Symbol name): bool =
+    try
+        match lookup env (Symbol name) with
+        | _ -> true
+    with
+    | RuntimeError _ -> false
+
+let car (Object { contents = {is_mutable = _; value = Pair p} }) =
+    match p with
+    | Nil -> raise (RuntimeError "cannot take car of an empty list")
+    | (CC (hd, _)) -> hd
+
+let cdr (Object { contents = {is_mutable = _; value = Pair p} }) =
+    match p with
+    | Nil -> raise (RuntimeError "cannot take cdr of an empty list")
+    | (CC (_, tl)) -> tl
+
+let cadr = Fn.compose car cdr
+let cddr = Fn.compose cdr cdr
+
+let is_null x =
+    match x with
+    | Object { contents = {is_mutable = _; value = Pair Nil } } -> true
+    | _ -> false
+
+
+let rec eval (env: environment) (ast: lisp): lisp = 
+    match ast with
+    (* Primitive values evaluate to themselves *)
+    | Integer x -> Integer x
+    | Float x -> Float x
+    | Boolean x -> Boolean x
+    | Char x -> Char x
+    | Symbol x -> lookup env (Symbol x)
+    | Quote x -> x
+
+    (*** Object types ***)
+
+    (* objects which evaluate to themselves *)
+    | Object { contents = { is_mutable = _; value = String _ } } as str -> str
+    | Object { contents = { is_mutable = _; value = Pair Nil } } as empty_list -> empty_list
+    | Object { contents = { is_mutable = _; value = Lambda (_, _) } } as procedure -> procedure
+    | Object { contents = { is_mutable = _; value = Builtin _ } } as procedure -> procedure
+
+    (* These evaluate as a special form as long as their syntactic keyword has not been defined as a variable *)
+    | Object { contents = { is_mutable = _; value = Pair (CC (Symbol "if", tl)) } }
+        when is_undefined env (Symbol "if") -> (
+            let condition, tl2 = car tl, cdr tl in
+            let consequent, tl3 = car tl2, cdr tl2 in
+            if is_null tl3 then (
+                let cond = eval env condition in
+                match cond with
+                | Boolean false -> null
+                | _ -> eval env consequent
+            ) else (
+                let alternate, tl4 = car tl3, cdr tl3 in
+                if not (is_null tl4) then
+                    raise (SyntaxError "ill-formed if")
+                else (
+                    let cond = eval env condition in
+                    match cond with
+                    | Boolean false -> eval env alternate
+                    | _ -> eval env consequent
+                )
+            )
+        )
+    | Object { contents = { is_mutable = _; value = Pair (CC (Symbol "lambda", _)) } } as lambda
+        when is_undefined env (Symbol "lambda") -> 
+            (
+                Object (ref { is_mutable = false; value = Lambda (env, lambda) })
+            )
+
+    (* all other procedure calls *)
+    | Object { contents = { is_mutable = _; value = Pair (CC (hd, tl)) } } -> apply env hd tl
+and apply (env: environment) procedure body =
+    match procedure with
+    | Object { contents = { is_mutable = _; value = Builtin f} } -> f body
+    | Object { contents = { is_mutable = _; value = Lambda (env, body)} } -> (
+        let _ = match car body with
+        | Symbol "lambda" -> ()
+        | _ -> assert false
+        in
+        let formals = cadr body in
+    )
 
 (* REPL *)
 exception EndOfInput
