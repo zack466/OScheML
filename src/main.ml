@@ -18,24 +18,11 @@ open Stdio
         - random blog posts on the internet on the implementation of Lisps
 *)
 
-module Hashtbl_printable = struct
-  type ('k,'s) t = ('k, 's) Hashtbl.t
-
-  let pp pp_key pp_value ppf  values =
-      (* get rid of 'unused values' warning *)
-      let _ = pp_key in
-      let _ = pp_value in
-      let _ = ppf in
-      let _ = values in
-      () (* not actually printing anything bc might result in stack overflow *)
-end
-
 let print str =
     Out_channel.output_string stdout str;
     Out_channel.output_string stdout "\n";
     Out_channel.flush stdout;
 
-(* Syntactic sugar is run on this parse tree *)
 type lisp_parse =
     | Atom of string
     | IntegerLiteral of int
@@ -45,20 +32,6 @@ type lisp_parse =
     | Quote of lisp_parse
     | List of lisp_parse list
 [@@deriving show]
-
-(* The AST for this lisp *)
-(* type lisp = 
-    | Atom of string
-    | Number of float
-    | Boolean of bool
-    | String of string
-    | Quote of lisp
-    | Symbol of string
-    | List of lisp list
-    | Pair of lisp list (* must have only 2 items, unfortunate schism bc list by itself cannot tell the difference between (cons 1 2) and (cons 1 '(2)) *)
-    | Lambda of lisp * environment ref (* extra variant just to store closure environment *)
-and environment = | Env of environment ref option * (string, lisp) Hashtbl_printable.t
-[@@deriving show] *)
 
 (* Returns a parse tree of type lisp_parse *)
 let parse = 
@@ -120,18 +93,7 @@ type lisp =
     | Char of char
     | Quote of lisp
 
-    (* (* builtin "functions" / special forms *)
-    (* conditional - (if <test> <consequent> [alternate] )*)
-    | If of lisp
-
-    (* set! - (set! <variable> <expression> )*)
-    | Set of lisp
-    
-    | And of lisp
-    | Or of lisp
-    | Begin of lisp *)
 and reference = {is_mutable: bool; value: reference_value}
-
 and reference_value =
     (* Homebrewed linked list *)
     | Pair of pair
@@ -150,13 +112,8 @@ and reference_value =
 and pair = Nil | CC of lisp * lisp
 and environment = {
     parent: environment ref option;
-    table: (string, lisp) Hashtbl_printable.t
+    table: (string, lisp) Hashtbl.t
 }
-
-(* let is_exact = function
-    | Int _ -> true
-    | Float _ -> false
-    | _ -> assert false *)
 
 exception SyntaxError of string
 
@@ -171,7 +128,6 @@ let null = Object (ref _null)
 
 let rec actualize (parse_tree: lisp_parse): lisp =
     match parse_tree with
-    (* | Atom x when is_syntactic_keyword x -> raise (SyntaxError ("Syntactic keyword '" ^ x ^ "' cannot be used as an expression")) *)
     | Atom x -> Symbol x
     | IntegerLiteral x -> Integer x
     | FloatLiteral x -> Float x
@@ -195,9 +151,6 @@ let rec actualize (parse_tree: lisp_parse): lisp =
                 })
         | _ :: Atom "." :: _ ->
                 raise (SyntaxError "Incorrect usage of . notation")
-
-        (* special forms *)
-        (* | Atom "if" :: tl -> If (Object { is_mutable = true; value = ref (Pair (CC ((Symbol "if"), (actualize (List tl)))))}) *)
 
         (* Otherwise, a standard list *)
         | hd :: tl ->
@@ -233,12 +186,6 @@ let rec show_lisp (ast: lisp) =
     | Char x -> Char.to_string x
     | Quote x -> "'" ^ (show_lisp x)
 
-    (* builtin syntax / special forms *)
-    (* | If x -> show_lisp x
-    | Set x -> show_lisp x
-    | And x -> show_lisp x
-    | Or x -> show_lisp x
-    | Begin x -> show_lisp x *)
 and show_reference_value rv =
     match rv with
     | Lambda (_, _) -> "Compound procedure"
@@ -273,9 +220,9 @@ let is_undefined (env: environment) symbol: bool =
     | Symbol name -> (
         try
             match env_lookup env (Symbol name) with
-            | _ -> true
+            | _ -> false
         with
-        | RuntimeError _ -> false
+        | RuntimeError _ -> true
     )
     | _ -> raise (RuntimeError "cannot lookup a non-symbol")
 
@@ -326,6 +273,20 @@ let rec map_list ~f list =
         Object (ref { is_mutable = m; value = Pair (CC ((f hd), map_list ~f:f tl)) } )
     )
     | _ -> raise (RuntimeError "Cannot call map on non-lists")
+
+let fold_list list ~init ~f =
+    let rec iter ls acc =
+        if is_null ls then acc
+        else iter (cdr ls) (f acc (car ls))
+    in
+    iter list init
+
+let length_list list =
+    let rec iter ls acc =
+        if (is_null ls) then acc
+        else (iter (cdr ls) (1 + acc))
+    in
+    iter list 0
 
 let rec eval (env: environment) (ast: lisp): lisp = 
     match ast with
@@ -379,7 +340,6 @@ let rec eval (env: environment) (ast: lisp): lisp =
     )
 
 and apply (env: environment) procedure args =
-    print ("Calling " ^ (show_lisp procedure) ^ "on " ^ (show_lisp args));
     match procedure with
     | Object { contents = { is_mutable = _; value = Builtin f} } -> f args
     | Object { contents = { is_mutable = _; value = Lambda (closure, lambda)} } -> (
@@ -421,18 +381,56 @@ and apply (env: environment) procedure args =
     )
     | x -> raise (RuntimeError ((show_lisp x) ^ " cannot be applied"))
 
+(*** Builtin functions ***)
+let global_env = env_new None
+
+(* Functions that automatically promote from Integer to Float *)
+let _make_poly f_name f_int f_float =
+    fun x ->
+    match x with
+    | Integer a -> Integer (f_int a)
+    | Float a -> Float (f_float a)
+    | _ -> raise (RuntimeError ("Incorrect type of argument to " ^ f_name))
+
+let _make_poly2 f_name f_int f_float =
+    fun x -> fun y ->
+    match (x, y) with
+    | (Integer a, Integer b) -> Integer (f_int a b)
+    | (Float a, Integer b) -> Float (f_float a (Float.of_int b))
+    | (Integer a, Float b) -> Float (f_float (Float.of_int a) b)
+    | (Float a, Float b) -> Float (f_float a b)
+    | (_, _) -> raise (RuntimeError ("Incorrect type of arguments to " ^ f_name))
+
+let _add args = fold_list args ~init:(Integer 0) ~f:(_make_poly2 "+" ( + ) ( +. ))
+let _mul args = fold_list args ~init:(Integer 1) ~f:(_make_poly2 "*" ( * ) ( *. ))
+
+let _sub args = 
+    if (is_null args) then
+        raise (RuntimeError "- must receive at least 1 argument")
+    else if (length_list args = 1) then
+        (_make_poly "-" ( ~- ) ( ~-. )) (car args)
+    else
+        fold_list (cdr args) ~init:(car args) ~f:(_make_poly2 "-" ( - ) ( -. ))
+
+let _div args = 
+    if (is_null args) then
+        raise (RuntimeError "- must receive at least 1 argument")
+    else if (length_list args = 1) then
+        (_make_poly2 "/" ( / ) ( /. )) (Integer 1) (car args)
+    else
+        fold_list (cdr args) ~init:(car args) ~f:(_make_poly2 "/" ( / ) ( /. ))
+
+let _ =
+    env_set global_env ~key:"+" ~data:(Object (ref {is_mutable = false; value = Builtin _add}));
+    env_set global_env ~key:"-" ~data:(Object (ref {is_mutable = false; value = Builtin _sub}));
+    env_set global_env ~key:"*" ~data:(Object (ref {is_mutable = false; value = Builtin _mul}));
+    env_set global_env ~key:"/" ~data:(Object (ref {is_mutable = false; value = Builtin _div}))
+
 (* REPL *)
 exception EndOfInput
 
 let count_char c str =
     String.count str ~f:(fun x -> if phys_equal x c then true else false)
-
-let global_env = env_new None
-let plus args =
-    car args
-
-let _ =
-    env_set global_env ~key:"+" ~data:(Object (ref {is_mutable = false; value = Builtin plus}))
 
 let _ = 
     let over = ref false in
@@ -472,59 +470,7 @@ let _ =
         | EndOfInput -> over := true
     done;
 
-(* exception UndefinedIdentifier of string
-
-
-let env_new parent =
-    match parent with
-    | Some parent_env -> Env (Some parent_env,  Hashtbl.create(module String))
-    | None -> Env (None, Hashtbl.create(module String))
-
-let rec env_lookup env x =
-    match env with
-    | Env (Some parent, current) -> (
-        match Hashtbl.find current x with
-        | Some v -> v
-        | None -> env_lookup !parent x
-    )
-    | Env (None, current) -> (
-        match Hashtbl.find current x with
-        | Some v -> v
-        | None -> raise (UndefinedIdentifier ("identifier " ^ x ^ " not found"))
-    )
-
-let env_set env ~key ~data =
-    match env with
-    | Env (_, e) -> Hashtbl.set e ~key:key ~data:data
-
-exception RuntimeError of string
-
-let unbox_number x =
-    match x with
-    | Number y -> y
-    | _ -> raise (RuntimeError ("cannot convert " ^ show_lisp x ^ " to float"))
-
-let sum args =
-    match args with
-    | [] -> raise (RuntimeError "+ requires at least 1 argument")
-    | _ -> List.sum (module Float) args ~f:unbox_number
-
-let prod args =
-    match args with
-    | [] -> raise (RuntimeError "* requires at least 1 argument")
-    | _ -> List.fold ~init:1.0 ~f:( *. ) (List.map args ~f:unbox_number)
-
-let sub args =
-    match args with
-    | [] -> raise (RuntimeError "- requires at least 1 argument")
-    | [hd] -> 0.0 -. unbox_number hd 
-    | hd::tl -> unbox_number hd -. sum tl
-
-let div args =
-    match args with
-    | [] -> raise (RuntimeError "/ requires at least 1 argument")
-    | [hd] -> 1.0 /. unbox_number hd 
-    | hd::tl -> unbox_number hd /. prod tl
+(*
 
 let unbox_boolean x =
     match x with
