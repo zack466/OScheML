@@ -289,6 +289,10 @@ let is_null x =
     | Object { contents = {is_mutable = _; value = Pair Nil } } -> true
     | _ -> false
 
+let is_symbol x =
+    match x with
+    | Symbol _ -> true
+    | _ -> false
 
 let rec eval (env: environment) (ast: lisp): lisp = 
     match ast with
@@ -330,23 +334,46 @@ let rec eval (env: environment) (ast: lisp): lisp =
                 )
             )
         )
-    | Object { contents = { is_mutable = _; value = Pair (CC (Symbol "lambda", _)) } } as lambda
+    | Object { contents = { is_mutable = _; value = Pair (CC (Symbol "lambda", rest)) } }
         when is_undefined env (Symbol "lambda") -> 
             (
-                Object (ref { is_mutable = false; value = Lambda (env, lambda) })
+                Object (ref { is_mutable = false; value = Lambda (env, rest) })
             )
 
     (* all other procedure calls *)
     | Object { contents = { is_mutable = _; value = Pair (CC (hd, tl)) } } -> apply env hd tl
-and apply (env: environment) procedure body =
+
+and apply (env: environment) procedure args =
     match procedure with
-    | Object { contents = { is_mutable = _; value = Builtin f} } -> f body
-    | Object { contents = { is_mutable = _; value = Lambda (env, body)} } -> (
-        let _ = match car body with
-        | Symbol "lambda" -> ()
-        | _ -> assert false
-        in
-        let formals = cadr body in
+    | Object { contents = { is_mutable = _; value = Builtin f} } -> f args
+    | Object { contents = { is_mutable = _; value = Lambda (closure, lambda)} } -> (
+        let formals = car lambda in
+        let body = cadr lambda in
+        if is_null formals then
+            eval env body
+        else
+            let new_table = Hashtbl.create(module String) in
+            let new_env =  { parent = Some (ref closure); table = new_table } in
+            let rec zip_args formals params func_env =
+                if is_null formals then
+                    if is_null params then
+                        () (* done *)
+                    else
+                        raise (RuntimeError "Procedure called with too many arguments")
+                else if is_symbol formals (* when last argument is dotted *)
+                    
+                    
+                if (not (is_null formals)) && (not (is_null params)) then
+                    let _ = match (car formals) with
+                    | Symbol name -> (
+                        Hashtbl.set func_env ~key:name ~data:(car params)
+                    )
+                    | _ -> raise (SyntaxError "Invalid argument syntax")
+                    in
+                    zip_args (cdr formals) (cdr params) func_env
+            in
+            let _ = zip_args formals args new_table in
+            eval new_env body
     )
 
 (* REPL *)
