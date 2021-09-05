@@ -428,6 +428,11 @@ let count_char c str =
     String.count str ~f:(fun x -> if phys_equal x c then true else false)
 
 let global_env = env_new None
+let plus args =
+    car args
+
+let _ =
+    env_set global_env ~key:"+" ~data:(Object (ref {is_mutable = false; value = Builtin plus}))
 
 let _ = 
     let over = ref false in
