@@ -12,10 +12,11 @@ open Stdio
 
 (*
     REFERENCES:
+        - Revised^5 Report on the Algorithmic Language Scheme
         - Revised^7 Report on the Algorithmic Language Scheme
         - Structure and Interpretation of Computer Programs
         - Crafting Interpreters
-        - random blog posts on the internet on the implementation of Lisps
+        - random blog posts on the internet about Lisp/Scheme
 *)
 
 let print str =
@@ -47,6 +48,8 @@ let parse =
             | '(' | ')' | ':' | ',' -> false
             | _ -> true)
         >>= fun s ->
+        try return (IntegerLiteral (Int.of_string s))
+        with _ ->
         try return (FloatLiteral (Float.of_string s))
         with _ -> fail "invalid number literal" in
 
@@ -257,6 +260,11 @@ let is_symbol x =
     | Symbol _ -> true
     | _ -> false
 
+let is_list x =
+    match x with
+    | Object { contents = { is_mutable = _; value = Pair _ } } -> true
+    | _ -> false
+
 let env_new parent =
     match parent with
     | Some parent_env -> { parent = Some (ref parent_env); table = Hashtbl.create(module String) }
@@ -274,6 +282,9 @@ let rec map_list ~f list =
     )
     | _ -> raise (RuntimeError "Cannot call map on non-lists")
 
+let cons a b =
+    Object (ref { is_mutable = true; value = Pair (CC (a, b))})
+
 let fold_list list ~init ~f =
     let rec iter ls acc =
         if is_null ls then acc
@@ -287,6 +298,9 @@ let length_list list =
         else (iter (cdr ls) (1 + acc))
     in
     iter list 0
+
+let wrap_in_begin lisp =
+    Object (ref { is_mutable = true; value = Pair (CC (Symbol "begin", lisp))})
 
 let rec eval (env: environment) (ast: lisp): lisp = 
     match ast with
@@ -334,6 +348,44 @@ let rec eval (env: environment) (ast: lisp): lisp =
                 Object (ref { is_mutable = false; value = Lambda (env, rest) })
             )
 
+    | Object { contents = { is_mutable = m; value = Pair (CC (Symbol "begin", rest)) } }
+        when is_undefined env (Symbol "begin") -> 
+            (
+                if is_null rest then
+                    null
+                else if (length_list rest = 1) then
+                    eval env (car rest)
+                else (
+                    let _ = eval env (car rest) in
+                    eval env (Object (ref { is_mutable = m; value = Pair (CC (Symbol "begin", cdr rest))}))
+                )
+            )
+
+    | Object { contents = { is_mutable = _; value = Pair (CC (Symbol "define", rest)) } }
+        when is_undefined env (Symbol "define") -> 
+            (
+                try
+                    let formals = car rest in
+                    let body = cdr rest in
+                    match formals with
+                    | Symbol name -> (
+                        if (length_list body = 1) then (
+                            env_set env ~key:name ~data:(eval env (car body));
+                            null
+                        ) else (
+                            raise (RuntimeError "")
+                        )
+                    )
+                    | Object { contents = { is_mutable = _; value = Pair (CC (Symbol f, args)) } } -> (
+                        let proc = Object (ref { is_mutable = false; value = Lambda (env, cons args (cons (Symbol "begin") (cdr rest))) }) in
+                        env_set env ~key:f ~data:proc;
+                        null
+                    )
+                    | _ -> raise (RuntimeError "")
+                with
+                | RuntimeError msg -> print msg; raise (SyntaxError "Incorrect usage of define")
+            )
+
     (* all other procedure calls *)
     | Object { contents = { is_mutable = _; value = Pair (CC (hd, tl)) } } -> (
         apply env (eval env hd) (map_list ~f:(eval env) tl)
@@ -344,7 +396,9 @@ and apply (env: environment) procedure args =
     | Object { contents = { is_mutable = _; value = Builtin f} } -> f args
     | Object { contents = { is_mutable = _; value = Lambda (closure, lambda)} } -> (
         let formals = car lambda in
-        let body = cadr lambda in
+        let body = cons (Symbol "begin") (cdr lambda) in
+        (* print ("Formals: " ^ (show_lisp formals));
+        print ("Body: " ^ (show_lisp body)); *)
         if is_null formals then
             eval env body
         else
@@ -420,11 +474,27 @@ let _div args =
     else
         fold_list (cdr args) ~init:(car args) ~f:(_make_poly2 "/" ( / ) ( /. ))
 
+let rec _lt args =
+    if (length_list args <= 1) then
+        true
+    else
+        let a = car args in
+        let b = car (cdr args) in
+        let res = match (a, b) with
+        | (Integer a, Integer b) -> (Poly.(<) a b)
+        | (Float a, Integer b) -> (Poly.(<) a (Float.of_int b))
+        | (Integer a, Float b) -> (Poly.(<) (Float.of_int a) b)
+        | (Float a, Float b) -> (Poly.(<) a b)
+        | (_, _) -> raise (RuntimeError ("Incorrect type of arguments to <"))
+        in
+        res && (_lt (cdr args))
+
 let _ =
     env_set global_env ~key:"+" ~data:(Object (ref {is_mutable = false; value = Builtin _add}));
     env_set global_env ~key:"-" ~data:(Object (ref {is_mutable = false; value = Builtin _sub}));
     env_set global_env ~key:"*" ~data:(Object (ref {is_mutable = false; value = Builtin _mul}));
-    env_set global_env ~key:"/" ~data:(Object (ref {is_mutable = false; value = Builtin _div}))
+    env_set global_env ~key:"/" ~data:(Object (ref {is_mutable = false; value = Builtin _div}));
+    env_set global_env ~key:"<" ~data:(Object (ref {is_mutable = false; value = Builtin (fun x -> Boolean (_lt x))}))
 
 (* REPL *)
 exception EndOfInput
@@ -455,7 +525,7 @@ let _ =
             | Ok res -> (
                 (* print (show_lisp_parse res); *)
                 let ast = actualize res in
-                print (show_lisp ast);
+                (* print (show_lisp ast); *)
                 try
                     let result = eval global_env ast in
                     print (show_lisp result)
