@@ -442,59 +442,79 @@ let global_env = env_new None
 let _make_poly f_name f_int f_float =
     fun x ->
     match x with
-    | Integer a -> Integer (f_int a)
-    | Float a -> Float (f_float a)
+    | Integer a -> f_int a
+    | Float a -> f_float a
     | _ -> raise (RuntimeError ("Incorrect type of argument to " ^ f_name))
 
 let _make_poly2 f_name f_int f_float =
     fun x -> fun y ->
     match (x, y) with
-    | (Integer a, Integer b) -> Integer (f_int a b)
-    | (Float a, Integer b) -> Float (f_float a (Float.of_int b))
-    | (Integer a, Float b) -> Float (f_float (Float.of_int a) b)
-    | (Float a, Float b) -> Float (f_float a b)
+    | (Integer a, Integer b) -> f_int a b
+    | (Float a, Integer b) -> f_float a (Float.of_int b)
+    | (Integer a, Float b) -> f_float (Float.of_int a) b
+    | (Float a, Float b) -> f_float a b
     | (_, _) -> raise (RuntimeError ("Incorrect type of arguments to " ^ f_name))
 
-let _add args = fold_list args ~init:(Integer 0) ~f:(_make_poly2 "+" ( + ) ( +. ))
-let _mul args = fold_list args ~init:(Integer 1) ~f:(_make_poly2 "*" ( * ) ( *. ))
+let _box_int x =
+    Integer x
+let _box_float x =
+    Float x
+
+let _add args = fold_list args ~init:(Integer 0) ~f:(_make_poly2 "+" (fun x -> fun y -> _box_int(x+y)) (fun x -> fun y -> _box_float(x +. y)))
+let _mul args = fold_list args ~init:(Integer 1) ~f:(_make_poly2 "*" (fun x -> fun y -> _box_int(x*y)) (fun x -> fun y -> _box_float(x *. y)))
 
 let _sub args = 
     if (is_null args) then
         raise (RuntimeError "- must receive at least 1 argument")
     else if (length_list args = 1) then
-        (_make_poly "-" ( ~- ) ( ~-. )) (car args)
+        (_make_poly "-" (fun x -> _box_int(-x)) (fun x -> _box_float (-. x)) (car args))
     else
-        fold_list (cdr args) ~init:(car args) ~f:(_make_poly2 "-" ( - ) ( -. ))
+        fold_list (cdr args) ~init:(car args) ~f:(_make_poly2 "-" (fun x -> fun y -> _box_int(x - y) ) (fun x -> fun y -> _box_float (x -. y) ))
 
 let _div args = 
     if (is_null args) then
         raise (RuntimeError "- must receive at least 1 argument")
     else if (length_list args = 1) then
-        (_make_poly2 "/" ( / ) ( /. )) (Integer 1) (car args)
+        (_make_poly2 "/" (fun x -> fun y -> _box_int(x / y) ) (fun x -> fun y -> _box_float(x /. y))) (Integer 1) (car args)
     else
-        fold_list (cdr args) ~init:(car args) ~f:(_make_poly2 "/" ( / ) ( /. ))
+        fold_list (cdr args) ~init:(car args) ~f:(_make_poly2 "/" (fun x -> fun y -> _box_int(x / y) ) (fun x -> fun y -> _box_float(x /. y)))
 
-let rec _lt args =
+(* map over a list by pairs *)
+let rec _map2 ~f args =
     if (length_list args <= 1) then
-        true
+        null
     else
         let a = car args in
         let b = car (cdr args) in
-        let res = match (a, b) with
-        | (Integer a, Integer b) -> (Poly.(<) a b)
-        | (Float a, Integer b) -> (Poly.(<) a (Float.of_int b))
-        | (Integer a, Float b) -> (Poly.(<) (Float.of_int a) b)
-        | (Float a, Float b) -> (Poly.(<) a b)
-        | (_, _) -> raise (RuntimeError ("Incorrect type of arguments to <"))
+        let res = f a b in
+        cons res (_map2 ~f (cdr args))
+
+let _and b1 b2 =
+    match (b1, b2) with
+    | (Boolean true, Boolean true) -> Boolean true
+    | _ -> Boolean false
+
+let _lt args =
+    if (length_list args <= 1) then
+        Boolean true
+    else
+        let to_bool a b =
+            match (a, b) with
+            | (Integer a, Integer b) -> Boolean (Poly.(<) a b)
+            | (Float a, Integer b) -> Boolean (Poly.(<) a (Float.of_int b))
+            | (Integer a, Float b) -> Boolean (Poly.(<) (Float.of_int a) b)
+            | (Float a, Float b) -> Boolean (Poly.(<) a b)
+            | (_, _) -> raise (RuntimeError ("Incorrect type of arguments to <"))
         in
-        res && (_lt (cdr args))
+        let bools = _map2 ~f:to_bool args in
+        fold_list bools ~f:_and ~init:(Boolean true)
 
 let _ =
     env_set global_env ~key:"+" ~data:(Object (ref {is_mutable = false; value = Builtin _add}));
     env_set global_env ~key:"-" ~data:(Object (ref {is_mutable = false; value = Builtin _sub}));
     env_set global_env ~key:"*" ~data:(Object (ref {is_mutable = false; value = Builtin _mul}));
     env_set global_env ~key:"/" ~data:(Object (ref {is_mutable = false; value = Builtin _div}));
-    env_set global_env ~key:"<" ~data:(Object (ref {is_mutable = false; value = Builtin (fun x -> Boolean (_lt x))}))
+    env_set global_env ~key:"<" ~data:(Object (ref {is_mutable = false; value = Builtin _lt}))
 
 (* REPL *)
 exception EndOfInput
