@@ -299,9 +299,6 @@ let length_list list =
     in
     iter list 0
 
-let wrap_in_begin lisp =
-    Object (ref { is_mutable = true; value = Pair (CC (Symbol "begin", lisp))})
-
 let rec eval (env: environment) (ast: lisp): lisp = 
     match ast with
     (* Primitive values evaluate to themselves *)
@@ -377,7 +374,7 @@ let rec eval (env: environment) (ast: lisp): lisp =
                         )
                     )
                     | Object { contents = { is_mutable = _; value = Pair (CC (Symbol f, args)) } } -> (
-                        let proc = Object (ref { is_mutable = false; value = Lambda (env, cons args (cons (Symbol "begin") (cdr rest))) }) in
+                        let proc = Object (ref { is_mutable = false; value = Lambda (env, cons args (cdr rest)) }) in
                         env_set env ~key:f ~data:proc;
                         null
                     )
@@ -397,8 +394,8 @@ and apply (env: environment) procedure args =
     | Object { contents = { is_mutable = _; value = Lambda (closure, lambda)} } -> (
         let formals = car lambda in
         let body = cons (Symbol "begin") (cdr lambda) in
-        (* print ("Formals: " ^ (show_lisp formals));
-        print ("Body: " ^ (show_lisp body)); *)
+        print ("Formals: " ^ (show_lisp formals));
+        print ("Body: " ^ (show_lisp body));
         if is_null formals then
             eval env body
         else
