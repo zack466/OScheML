@@ -1,4 +1,4 @@
 (executable
  (name main)
- (libraries base angstrom stdio)
+ (libraries base angstrom stdio str)
  (preprocess (pps ppx_deriving.show)))

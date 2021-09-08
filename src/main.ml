@@ -2,7 +2,7 @@ open Base
 open Stdio
 
 (*
-    SCHEME 1F - a (mostly) R5RS-compliant Scheme written in a single file of OCaml
+    OScheme - a (somewhat) R5RS-compliant Scheme written in a single file of OCaml
 *)
 
 (* 
@@ -69,28 +69,38 @@ let parse =
         Angstrom.string "#f" <?> "boolean literal"
         >>| fun _ -> BooleanLiteral false in
 
-    let atom = take_while1 (function ' ' | '(' | ')' | '\'' | '"' -> false | _ -> true) <?> "atom"
+    let atom = take_while1 (function
+        | 'a' .. 'z' | '!' | '$' | '%' | '&'
+        | '*' | '+' | '-' | '.' | '/' | ':' | '<'
+        | '=' | '>' | '?' | '@' | '^' | '_' | '~'
+
+    -> true | _ -> false) <?> "atom"
         >>| fun x -> Atom x in
 
     let ws = skip_while (function
       | '\x20' | '\x0a' | '\x0d' | '\x09' -> true
       | _ -> false) in
 
-    let comment = (char ';' >>= fun _ -> skip_while (function
-        | '\n' -> false
-        | _ -> true)) <|> return ()
+    let comment = char ';' >>= fun _ -> skip_while (function '\n' -> false | _ -> true)
     in
 
     let lisp = fix (fun lisp ->
-        let ele = choice [num; string; boolean_true; boolean_false; atom] in
-        let list = lp *> many (ws *> lisp <* ws) <* rp >>| fun x -> List x in
+        let ele = (choice [num; string; boolean_true; boolean_false; atom]) in
+        let list = ws *> lp *> many (ws *> lisp <* ws) <* rp <* ws >>| fun x -> List x in
         (both (option '\x00' quote) (list <|> ele)
         >>| fun res -> match res with
         | ('\'', x) -> Quote x
         | (_, x) -> x)
     ) in
 
-    fun x -> parse_string ~consume:Prefix (comment *> lisp <* comment) (x ^ "\n")
+    fun x -> (
+        let lines = Str.split (Str.regexp "\n") x in
+        let filtered = List.filter lines ~f:(fun x -> String.length x > 0) in
+        let filtered = List.filter filtered ~f:(fun x -> not (Char.(=) (String.get x 0) ';')) in
+        let str = String.concat ~sep:"\n" filtered in
+        print str;
+        parse_string ~consume:All (many lisp) str
+    )
 
 (* the abstract syntax tree representation for this lisp *)
 type lisp =
@@ -412,8 +422,6 @@ and apply (env: environment) procedure args =
     | Object { contents = { is_mutable = _; value = Lambda (closure, lambda)} } -> (
         let formals = car lambda in
         let body = cons (Symbol "begin") (cdr lambda) in
-        print ("Formals: " ^ (show_lisp formals));
-        print ("Body: " ^ (show_lisp body));
         if is_null formals then
             eval env body
         else
@@ -647,7 +655,7 @@ exception EndOfInput
 let count_char c str =
     String.count str ~f:(fun x -> if phys_equal x c then true else false)
 
-let _ = 
+let repl () = 
     let over = ref false in
     while not !over do
         try
@@ -669,14 +677,17 @@ let _ =
             match parse (Buffer.contents buf) with
             | Ok res -> (
                 (* print (show_lisp_parse res); *)
-                let ast = actualize res in
+                let asts = List.map ~f:actualize res in
                 (* print (show_lisp ast); *)
-                try
-                    let result = eval global_env ast in
-                    print (show_lisp result)
-                with
-                | RuntimeError msg -> print ("RuntimeError: " ^ msg)
-                | SyntaxError msg -> print ("SyntaxError: " ^ msg)
+                let interpret ast = 
+                    try
+                        let result = eval global_env ast in
+                        print (show_lisp result)
+                    with
+                    | RuntimeError msg -> print ("RuntimeError: " ^ msg)
+                    | SyntaxError msg -> print ("SyntaxError: " ^ msg)
+                in
+                List.iter ~f:interpret asts
             )
             | Error msg -> print msg;
             ;
@@ -684,3 +695,49 @@ let _ =
         | SyntaxError msg -> print msg
         | EndOfInput -> over := true
     done;
+    ()
+
+
+let runfile file =
+    let ic = In_channel.create file in
+    let str = In_channel.input_all ic in
+    let _ = match parse str with
+    | Ok res -> (
+        List.iter ~f:(fun x -> print (show_lisp_parse x)) res;
+        let asts = List.map ~f:actualize res in
+        (* print (show_lisp ast); *)
+        let interpret ast = 
+            try
+                let result = eval global_env ast in
+                print (show_lisp result)
+            with
+            | RuntimeError msg -> print ("RuntimeError: " ^ msg)
+            | SyntaxError msg -> print ("SyntaxError: " ^ msg)
+        in
+        List.iter ~f:interpret asts
+    )
+    | Error msg -> print msg;
+    in
+    ()
+
+let _ =
+    let usage_msg = "oscheme [-i] [file] [file2] ..." in
+    let input_files = ref [] in
+    let interactive = ref false in
+    let anon_fun filename =
+        input_files := filename :: !input_files in
+    let speclist = [
+        ("-i", Caml.Arg.Set interactive, "Run input files, then open into a repl")
+    ] in
+    let () = Caml.Arg.parse speclist anon_fun usage_msg;
+
+    match !input_files with
+    | [] -> print "No arguments provided"; repl ();
+    | [filename] -> (
+        runfile filename;
+        if !interactive then
+            repl ();
+    )
+    | list -> List.iter ~f:runfile list;
+    in
+    ()
