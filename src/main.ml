@@ -76,6 +76,11 @@ let parse =
       | '\x20' | '\x0a' | '\x0d' | '\x09' -> true
       | _ -> false) in
 
+    let comment = (char ';' >>= fun _ -> skip_while (function
+        | '\n' -> false
+        | _ -> true)) <|> return ()
+    in
+
     let lisp = fix (fun lisp ->
         let ele = choice [num; string; boolean_true; boolean_false; atom] in
         let list = lp *> many (ws *> lisp <* ws) <* rp >>| fun x -> List x in
@@ -85,7 +90,7 @@ let parse =
         | (_, x) -> x)
     ) in
 
-    parse_string ~consume:All lisp
+    fun x -> parse_string ~consume:Prefix (comment *> lisp <* comment) (x ^ "\n")
 
 (* the abstract syntax tree representation for this lisp *)
 type lisp =
@@ -285,6 +290,15 @@ let rec map_list ~f list =
         Object (ref { is_mutable = m; value = Pair (CC ((f hd), map_list ~f:f tl)) } )
     )
     | _ -> raise (RuntimeError "Cannot call map on non-lists")
+
+let rec iter_list ~f list: unit =
+    match list with
+    | Object { contents = { is_mutable = _; value = Pair Nil } } -> ()
+    | Object { contents = { is_mutable = _; value = Pair (CC (hd, tl)) } } -> (
+        f hd;
+        iter_list ~f:f tl;
+    )
+    | _ -> raise (RuntimeError "Cannot call iter on non-lists")
 
 let cons a b =
     Object (ref { is_mutable = true; value = Pair (CC (a, b))})
@@ -597,6 +611,20 @@ let _not args =
         | Boolean x -> Boolean (not x)
         | _ -> raise (RuntimeError "argument to 'not' is not the correct type")
 
+let _is_list args =
+    if not (phys_equal 1 (length_list args)) then
+        raise (RuntimeError "list? expects exactly one argument")
+    else
+        Boolean (is_proper_list (car args))
+
+let _display args =
+    let _ = if is_proper_list args then
+        iter_list ~f:(Fn.compose print show_lisp) args
+    else
+        print (show_lisp args);
+    in 
+    null
+
 let _ =
     env_set global_env ~key:"+" ~data:(Object (ref {is_mutable = false; value = Builtin _add}));
     env_set global_env ~key:"-" ~data:(Object (ref {is_mutable = false; value = Builtin _sub}));
@@ -609,7 +637,9 @@ let _ =
     env_set global_env ~key:"equal?" ~data:(Object (ref {is_mutable = false; value = Builtin (fun x -> Boolean (is_equal x))}));
     env_set global_env ~key:"car" ~data:(Object (ref {is_mutable = false; value = Builtin _car}));
     env_set global_env ~key:"cdr" ~data:(Object (ref {is_mutable = false; value = Builtin _cdr}));
-    env_set global_env ~key:"not" ~data:(Object (ref {is_mutable = false; value = Builtin _not}))
+    env_set global_env ~key:"not" ~data:(Object (ref {is_mutable = false; value = Builtin _not}));
+    env_set global_env ~key:"display" ~data:(Object (ref {is_mutable = false; value = Builtin _display}));
+    env_set global_env ~key:"list?" ~data:(Object (ref {is_mutable = false; value = Builtin _is_list}))
 
 (* REPL *)
 exception EndOfInput
@@ -629,7 +659,7 @@ let _ =
                     Buffer.add_string buf input;
                     let lps = count_char '(' (Buffer.contents buf) in
                     let rps = count_char ')' (Buffer.contents buf) in
-                    if phys_equal lps rps then
+                    if phys_equal lps rps && lps > 0 then
                         loop_over := true
                     else if rps > lps then 
                         raise (SyntaxError "too many right parentheses")
