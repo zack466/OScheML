@@ -1,6 +1,10 @@
 open Base
 open Stdio
 
+(*
+    SCHEME 1F - a (mostly) R5RS-compliant Scheme written in a single file of OCaml
+*)
+
 (* 
    ARCHITECTURE:
        input -> parse -> actualize -> (interpret | compile)
@@ -184,14 +188,14 @@ let rec show_lisp (ast: lisp) =
     (* Primitives are immutable and reside on the stack (at least, behavior-wise) *)
     | Integer x -> Int.to_string x
     | Float x -> Float.to_string x
-    | Boolean x -> Bool.to_string x
+    | Boolean x -> if x then "#t" else "#f"
     | Symbol x -> x
     | Char x -> Char.to_string x
     | Quote x -> "'" ^ (show_lisp x)
 
 and show_reference_value rv =
     match rv with
-    | Lambda (_, _) -> "Compound procedure"
+    | Lambda (_, body) -> "Compound procedure: " ^ (show_lisp body)
     | Builtin _ -> "Builtin procedure"
     | Pair Nil -> "()"
     | Pair (CC (a, b)) -> "(" ^ (show_lisp a) ^ " . " ^ (show_lisp b) ^ ")"
@@ -506,12 +510,106 @@ let _lt args =
         let bools = _map2 ~f:to_bool args in
         fold_list bools ~f:_and ~init:(Boolean true)
 
+let _gt args =
+    if (length_list args <= 1) then
+        Boolean true
+    else
+        let to_bool a b =
+            match (a, b) with
+            | (Integer a, Integer b) -> Boolean (Poly.(>) a b)
+            | (Float a, Integer b) -> Boolean (Poly.(>) a (Float.of_int b))
+            | (Integer a, Float b) -> Boolean (Poly.(>) (Float.of_int a) b)
+            | (Float a, Float b) -> Boolean (Poly.(>) a b)
+            | (_, _) -> raise (RuntimeError ("Incorrect type of arguments to >"))
+        in
+        let bools = _map2 ~f:to_bool args in
+        fold_list bools ~f:_and ~init:(Boolean true)
+
+let is_eqv args: bool =
+    if not (phys_equal (length_list args) 2) then
+        raise (RuntimeError "eqv? requires exactly two arguments")
+    else
+        match (car args, car (cdr args)) with
+        | (Boolean x, Boolean y) -> Bool.(=) x y
+        | (Symbol x, Symbol y) -> String.(=) x y
+        | (Integer x, Integer y) -> Int.(=) x y
+        | (Float x, Float y) -> Float.(=) x y
+        | (Char x, Char y) -> Char.(=) x y
+        | (Object { contents = p }, Object { contents = q }) -> phys_equal p q
+        | (_, _) -> false
+
+(* for now, language makes no distinction between eqv? and eq? *)
+let is_eq = is_eqv
+
+let rec is_equal args: bool =
+    if not (phys_equal (length_list args) 2) then
+        raise (RuntimeError "equal? requires exactly two arguments")
+    else
+        match (car args, car (cdr args)) with
+        | (Boolean x, Boolean y) -> Bool.(=) x y
+        | (Symbol x, Symbol y) -> String.(=) x y
+        | (Integer x, Integer y) -> Int.(=) x y
+        | (Float x, Float y) -> Float.(=) x y
+        | (Char x, Char y) -> Char.(=) x y
+        | (Object { contents = p }, Object { contents = q }) -> (
+            if phys_equal p q then
+                true
+            else
+                (* check if objects are equal recursively *)
+                match (p, q) with
+                | (
+                    {is_mutable = _; value = Pair (CC (hd, tl))},
+                    {is_mutable = _; value = Pair ( CC (hd1, tl1))}
+                    ) -> (
+                        let eq1 = is_equal (cons hd (cons hd1 null)) in
+                        let eq2 = is_equal (cons tl (cons tl1 null)) in
+                        eq1 && eq2
+                        )
+                | (
+                    {is_mutable = _; value = String x},
+                    {is_mutable = _; value = String y}
+                    ) -> String.(=) x y
+                | ( (* lambda with the exact same formals and body are considered equal by value (as if they were lists) *)
+                    {is_mutable = _; value = Lambda (_, body1)},
+                    {is_mutable = _; value = Lambda (_, body2)}
+                    ) -> is_equal (cons body1 (cons body2 null))
+                | _ -> false
+        )
+        | (_, _) -> false
+
+let _car args =
+    if not (phys_equal 1 (length_list args)) then
+        raise (RuntimeError "car expects exactly one argument")
+    else
+        car (car args)
+
+let _cdr args =
+    if not (phys_equal 1 (length_list args)) then
+        raise (RuntimeError "cdr expects exactly one argument")
+    else
+        cdr (car args)
+
+let _not args =
+    if not (phys_equal 1 (length_list args)) then
+        raise (RuntimeError "not expects exactly one argument")
+    else
+        match (car args) with
+        | Boolean x -> Boolean (not x)
+        | _ -> raise (RuntimeError "argument to 'not' is not the correct type")
+
 let _ =
     env_set global_env ~key:"+" ~data:(Object (ref {is_mutable = false; value = Builtin _add}));
     env_set global_env ~key:"-" ~data:(Object (ref {is_mutable = false; value = Builtin _sub}));
     env_set global_env ~key:"*" ~data:(Object (ref {is_mutable = false; value = Builtin _mul}));
     env_set global_env ~key:"/" ~data:(Object (ref {is_mutable = false; value = Builtin _div}));
-    env_set global_env ~key:"<" ~data:(Object (ref {is_mutable = false; value = Builtin _lt}))
+    env_set global_env ~key:"<" ~data:(Object (ref {is_mutable = false; value = Builtin _lt}));
+    env_set global_env ~key:">" ~data:(Object (ref {is_mutable = false; value = Builtin _gt}));
+    env_set global_env ~key:"eqv?" ~data:(Object (ref {is_mutable = false; value = Builtin (fun x -> Boolean (is_eqv x))}));
+    env_set global_env ~key:"eq?" ~data:(Object (ref {is_mutable = false; value = Builtin (fun x -> Boolean (is_eq x))}));
+    env_set global_env ~key:"equal?" ~data:(Object (ref {is_mutable = false; value = Builtin (fun x -> Boolean (is_equal x))}));
+    env_set global_env ~key:"car" ~data:(Object (ref {is_mutable = false; value = Builtin _car}));
+    env_set global_env ~key:"cdr" ~data:(Object (ref {is_mutable = false; value = Builtin _cdr}));
+    env_set global_env ~key:"not" ~data:(Object (ref {is_mutable = false; value = Builtin _not}))
 
 (* REPL *)
 exception EndOfInput
@@ -817,11 +915,6 @@ and eval env ast =
     | List (hd::tl) -> apply env (eval env hd) (List.map tl ~f:(eval env))
     | Atom x -> env_lookup env x
 
-
-let _ =
-    let debug = true in
-    let global = env_new None in
-    (* builtin functions *)
     let _ = env_set global ~key:"+" ~data:(Atom "+") in
     let _ = env_set global ~key:"-" ~data:(Atom "-") in
     let _ = env_set global ~key:"*" ~data:(Atom "*") in
@@ -848,34 +941,4 @@ let _ =
     let _ = env_set global ~key:"list?" ~data:(Atom "list?") in
     let _ = env_set global ~key:"procedure?" ~data:(Atom "procedure?") in
     let _ = env_set global ~key:"apply" ~data:(Atom "apply") in
-    let over = ref false in
-    while not !over do
-        try
-            let buf = Buffer.create 16 in
-            let loop_over = ref false in
-            let _ = while not !loop_over do
-                match In_channel.input_line stdin with
-                | Some input -> (
-                    Buffer.add_string buf input;
-                    let lps = count_char '(' (Buffer.contents buf) in
-                    let rps = count_char ')' (Buffer.contents buf) in
-                    if phys_equal lps rps then
-                        loop_over := true
-                    else if rps > lps then 
-                        raise (SyntaxError "too many right parentheses")
-                    )
-                | None -> raise EndOfInput
-            done in
-            (* if debug then print (Buffer.contents buf); *)
-            let res = match parse (Buffer.contents buf) with
-                | Ok x -> if debug then print (show_lisp x); eval global x
-                | Error msg -> String msg
-            in
-            print (" -> " ^ show_lisp res ^ "\n");
-        with
-        | RuntimeError msg -> print msg
-        | UndefinedIdentifier msg -> print msg
-        | SyntaxError msg -> print msg
-        | EndOfInput -> over := true
-    done;
-    print "Goodbye!" *)
+    *)
