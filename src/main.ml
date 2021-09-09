@@ -540,6 +540,15 @@ let _and b1 b2 =
     | (Boolean true, Boolean true) -> Boolean true
     | _ -> Boolean false
 
+let _not _ args =
+    if not (phys_equal 1 (length_list args)) then
+        raise (RuntimeError "not expects exactly one argument")
+    else
+        match (car args) with
+        | Boolean x -> Boolean (not x)
+        | _ -> raise (RuntimeError "argument to 'not' is not the correct type")
+
+
 let _lt _ args =
     if (length_list args <= 1) then
         Boolean true
@@ -569,6 +578,9 @@ let _gt _ args =
         in
         let bools = _map2 ~f:to_bool args in
         fold_list bools ~f:_and ~init:(Boolean true)
+
+let _lte x args = _not x (cons (_gt x args) null)
+let _gte x args = _not x (cons (_lt x args) null)
 
 let is_eqv args: bool =
     if not (phys_equal (length_list args) 2) then
@@ -640,14 +652,6 @@ let _cons _ args =
     else
         cons (car args) (cadr args)
 
-let _not _ args =
-    if not (phys_equal 1 (length_list args)) then
-        raise (RuntimeError "not expects exactly one argument")
-    else
-        match (car args) with
-        | Boolean x -> Boolean (not x)
-        | _ -> raise (RuntimeError "argument to 'not' is not the correct type")
-
 let _predicate name f _ args =
     if not (phys_equal 1 (length_list args)) then
         raise (RuntimeError (name ^ " expects exactly one argument"))
@@ -662,6 +666,9 @@ let _display _ args =
     in 
     null
 
+(* (apply f a ... z) evaluates to (f args) where args = (append (a ... ) z)
+ * a, ... are individual elements and z is a list
+ *)
 let _apply env args =
     if (length_list args) = 0 then
         raise (RuntimeError ("apply expects at least one argument"))
@@ -683,6 +690,8 @@ let _ =
     env_set global_env ~key:"/" ~data:(Object (ref {is_mutable = false; value = Builtin _div}));
     env_set global_env ~key:"<" ~data:(Object (ref {is_mutable = false; value = Builtin _lt}));
     env_set global_env ~key:">" ~data:(Object (ref {is_mutable = false; value = Builtin _gt}));
+    env_set global_env ~key:"<=" ~data:(Object (ref {is_mutable = false; value = Builtin _lte}));
+    env_set global_env ~key:">=" ~data:(Object (ref {is_mutable = false; value = Builtin _gte}));
     env_set global_env ~key:"eqv?" ~data:(Object (ref {is_mutable = false; value = Builtin (fun _ -> fun x -> Boolean (is_eqv x))}));
     env_set global_env ~key:"eq?" ~data:(Object (ref {is_mutable = false; value = Builtin (fun _ -> fun x -> Boolean (is_eq x))}));
     env_set global_env ~key:"equal?" ~data:(Object (ref {is_mutable = false; value = Builtin (fun _ -> fun x -> Boolean (is_equal x))}));
