@@ -409,6 +409,26 @@ let rec eval (env: environment) (ast: lisp): lisp =
                 )
             )
 
+    | Object { contents = { is_mutable = _; value = Pair (CC (Symbol "set!", args)) } }
+        when is_undefined env (Symbol "set!") -> 
+            (
+                if not (phys_equal 2 (length_list args)) then
+                    raise (RuntimeError ("set! expects exactly two arguments"))
+                else (
+                    let var = car args in
+                    let expr = cadr args in
+                    let _ = match var with
+                    | Symbol name -> (
+                        if is_undefined env (Symbol name) then
+                            raise (RuntimeError (name ^ " is unbound"))
+                        else
+                            env_set env ~key:name ~data:expr
+                    )
+                    | _ -> raise (RuntimeError ("Cannot assign to " ^ (show_lisp var)))
+                    in null
+                )
+            )
+
     | Object { contents = { is_mutable = _; value = Pair (CC (Symbol "define", rest)) } }
         when is_undefined env (Symbol "define") -> 
             (
@@ -705,7 +725,7 @@ let _ =
     env_set global_env ~key:"string?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "string?" is_string)}));
     env_set global_env ~key:"pair?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "pair?" is_pair)}));
     env_set global_env ~key:"char?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "char?" is_char)}));
-    env_set global_env ~key:"procedure?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "procedure?" is_procedure)}))
+    env_set global_env ~key:"procedure?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "procedure?" is_procedure)}));
 
 (* REPL *)
 exception EndOfInput
