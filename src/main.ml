@@ -143,7 +143,7 @@ and reference_value =
     | Lambda of environment * lisp
 
     (* a builtin procedure, which can only be accessed from the initial environment *)
-    | Builtin of (lisp -> lisp)
+    | Builtin of (environment -> lisp -> lisp)
 
 and pair = Nil | CC of lisp * lisp
 and environment = {
@@ -303,6 +303,10 @@ let is_string = function
     | Object { contents = { is_mutable = _; value = String _}} -> true
     | _ -> false
 
+let is_procedure = function
+    | Object { contents = { is_mutable = _; value = Lambda _}} -> true
+    | _ -> false
+
 let env_new parent =
     match parent with
     | Some parent_env -> { parent = Some (ref parent_env); table = Hashtbl.create(module String) }
@@ -437,7 +441,7 @@ let rec eval (env: environment) (ast: lisp): lisp =
 
 and apply (env: environment) procedure args =
     match procedure with
-    | Object { contents = { is_mutable = _; value = Builtin f} } -> f args
+    | Object { contents = { is_mutable = _; value = Builtin f} } -> f env args
     | Object { contents = { is_mutable = _; value = Lambda (closure, lambda)} } -> (
         let formals = car lambda in
         let body = cons (Symbol "begin") (cdr lambda) in
@@ -495,17 +499,17 @@ let _make_poly2 f_name f_int f_float =
     | (Float a, Integer b) -> f_float a (Float.of_int b)
     | (Integer a, Float b) -> f_float (Float.of_int a) b
     | (Float a, Float b) -> f_float a b
-    | (_, _) -> raise (RuntimeError ("Incorrect type of arguments to " ^ f_name))
+    | (_, _) -> print (show_lisp x); print (show_lisp y); raise (RuntimeError ("Incorrect type of arguments to " ^ f_name))
 
 let _box_int x =
     Integer x
 let _box_float x =
     Float x
 
-let _add args = fold_list args ~init:(Integer 0) ~f:(_make_poly2 "+" (fun x -> fun y -> _box_int(x+y)) (fun x -> fun y -> _box_float(x +. y)))
-let _mul args = fold_list args ~init:(Integer 1) ~f:(_make_poly2 "*" (fun x -> fun y -> _box_int(x*y)) (fun x -> fun y -> _box_float(x *. y)))
+let _add _ args = fold_list args ~init:(Integer 0) ~f:(_make_poly2 "+" (fun x -> fun y -> _box_int(x+y)) (fun x -> fun y -> _box_float(x +. y)))
+let _mul _ args = fold_list args ~init:(Integer 1) ~f:(_make_poly2 "*" (fun x -> fun y -> _box_int(x*y)) (fun x -> fun y -> _box_float(x *. y)))
 
-let _sub args = 
+let _sub _ args = 
     if (is_null args) then
         raise (RuntimeError "- must receive at least 1 argument")
     else if (length_list args = 1) then
@@ -513,7 +517,7 @@ let _sub args =
     else
         fold_list (cdr args) ~init:(car args) ~f:(_make_poly2 "-" (fun x -> fun y -> _box_int(x - y) ) (fun x -> fun y -> _box_float (x -. y) ))
 
-let _div args = 
+let _div _ args = 
     if (is_null args) then
         raise (RuntimeError "- must receive at least 1 argument")
     else if (length_list args = 1) then
@@ -536,7 +540,7 @@ let _and b1 b2 =
     | (Boolean true, Boolean true) -> Boolean true
     | _ -> Boolean false
 
-let _lt args =
+let _lt _ args =
     if (length_list args <= 1) then
         Boolean true
     else
@@ -551,7 +555,7 @@ let _lt args =
         let bools = _map2 ~f:to_bool args in
         fold_list bools ~f:_and ~init:(Boolean true)
 
-let _gt args =
+let _gt _ args =
     if (length_list args <= 1) then
         Boolean true
     else
@@ -618,19 +622,25 @@ let rec is_equal args: bool =
         )
         | (_, _) -> false
 
-let _car args =
+let _car _ args =
     if not (phys_equal 1 (length_list args)) then
         raise (RuntimeError "car expects exactly one argument")
     else
         car (car args)
 
-let _cdr args =
+let _cdr _ args =
     if not (phys_equal 1 (length_list args)) then
         raise (RuntimeError "cdr expects exactly one argument")
     else
         cdr (car args)
 
-let _not args =
+let _cons _ args = 
+    if not (phys_equal 2 (length_list args)) then
+        raise (RuntimeError "cons expects exactly two argument")
+    else
+        cons (car args) (cadr args)
+
+let _not _ args =
     if not (phys_equal 1 (length_list args)) then
         raise (RuntimeError "not expects exactly one argument")
     else
@@ -638,19 +648,33 @@ let _not args =
         | Boolean x -> Boolean (not x)
         | _ -> raise (RuntimeError "argument to 'not' is not the correct type")
 
-let _predicate name f args =
+let _predicate name f _ args =
     if not (phys_equal 1 (length_list args)) then
         raise (RuntimeError (name ^ " expects exactly one argument"))
     else
         Boolean (f (car args))
 
-let _display args =
+let _display _ args =
     let _ = if is_proper_list args then
         iter_list ~f:(Fn.compose print show_lisp) args
     else
         print (show_lisp args);
     in 
     null
+
+let _apply env args =
+    if (length_list args) = 0 then
+        raise (RuntimeError ("apply expects at least one argument"))
+    else
+        let rec collect list =
+            if is_null list then
+                null
+            else if is_null (cdr list) then
+                car list
+            else
+                cons (car list) (collect (cdr list))
+        in
+        apply env (car args) (collect (cdr args))
 
 let _ =
     env_set global_env ~key:"+" ~data:(Object (ref {is_mutable = false; value = Builtin _add}));
@@ -659,17 +683,20 @@ let _ =
     env_set global_env ~key:"/" ~data:(Object (ref {is_mutable = false; value = Builtin _div}));
     env_set global_env ~key:"<" ~data:(Object (ref {is_mutable = false; value = Builtin _lt}));
     env_set global_env ~key:">" ~data:(Object (ref {is_mutable = false; value = Builtin _gt}));
-    env_set global_env ~key:"eqv?" ~data:(Object (ref {is_mutable = false; value = Builtin (fun x -> Boolean (is_eqv x))}));
-    env_set global_env ~key:"eq?" ~data:(Object (ref {is_mutable = false; value = Builtin (fun x -> Boolean (is_eq x))}));
-    env_set global_env ~key:"equal?" ~data:(Object (ref {is_mutable = false; value = Builtin (fun x -> Boolean (is_equal x))}));
+    env_set global_env ~key:"eqv?" ~data:(Object (ref {is_mutable = false; value = Builtin (fun _ -> fun x -> Boolean (is_eqv x))}));
+    env_set global_env ~key:"eq?" ~data:(Object (ref {is_mutable = false; value = Builtin (fun _ -> fun x -> Boolean (is_eq x))}));
+    env_set global_env ~key:"equal?" ~data:(Object (ref {is_mutable = false; value = Builtin (fun _ -> fun x -> Boolean (is_equal x))}));
     env_set global_env ~key:"car" ~data:(Object (ref {is_mutable = false; value = Builtin _car}));
     env_set global_env ~key:"cdr" ~data:(Object (ref {is_mutable = false; value = Builtin _cdr}));
+    env_set global_env ~key:"cons" ~data:(Object (ref {is_mutable = false; value = Builtin _cons}));
+    env_set global_env ~key:"apply" ~data:(Object (ref {is_mutable = false; value = Builtin _apply}));
     env_set global_env ~key:"not" ~data:(Object (ref {is_mutable = false; value = Builtin _not}));
     env_set global_env ~key:"display" ~data:(Object (ref {is_mutable = false; value = Builtin _display}));
     env_set global_env ~key:"list?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "list?" is_proper_list)}));
     env_set global_env ~key:"string?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "string?" is_string)}));
     env_set global_env ~key:"pair?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "pair?" is_pair)}));
-    env_set global_env ~key:"char?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "char?" is_char)}))
+    env_set global_env ~key:"char?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "char?" is_char)}));
+    env_set global_env ~key:"procedure?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "procedure?" is_procedure)}))
 
 (* REPL *)
 exception EndOfInput
