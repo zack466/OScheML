@@ -2,16 +2,16 @@ open Base
 open Stdio
 
 (*
-    OSchemel - a (somewhat) R5RS-compliant Scheme written in a single file of OCaml
+    OSchemel - a R5RS-inspired Scheme written in a single file of OCaml
 *)
 
 (* 
    ARCHITECTURE:
-       input -> parse -> actualize -> (interpret | compile)
+       input -> parse -> actualize -> eval
 
        A string input is parsed into a parse tree (a bit more useful than tokenization),
        which is then converted to a full abstract syntax tree (AST), which can then be
-       either interpreted with a tree-walk or compiled into bytecode.
+       interpreted with a recursive tree-walk (eval/apply).
  *)
 
 (*
@@ -34,6 +34,7 @@ type lisp_parse =
     | FloatLiteral of float
     | BooleanLiteral of bool
     | StringLiteral of string
+    | CharLiteral of char
     | Quote of lisp_parse
     | List of lisp_parse list
 [@@deriving show]
@@ -56,6 +57,12 @@ let parse =
         with _ ->
         try return (FloatLiteral (Float.of_string s))
         with _ -> fail "invalid number literal" in
+
+    let char_const = string "#\\" *>
+    ((string "space" >>| fun _ -> CharLiteral ' ')
+    <|> (string "newline" >>| fun _ -> CharLiteral '\n')
+    <|> (take 1 >>| fun x -> CharLiteral (String.get x 0)))
+    in
 
     let string =
         char '"' *> take_while1 (function '"' -> false | _ -> true) <* char '"' <?> "string literal"
@@ -91,7 +98,7 @@ let parse =
       | _ -> false)) in
 
     let lisp = fix (fun lisp ->
-        let ele = (choice [num; string; boolean_true; boolean_false; atom]) <* ws <* comment in
+        let ele = (choice [num; char_const; string; boolean_true; boolean_false; atom]) <* ws <* comment in
         let list = ws *> lp *> many (ws *> lisp <* ws) <* rp <* ws >>| fun x -> List x in
         (both (option '\x00' quote) (list <* comment <|> ele)
         >>| fun res -> match res with
@@ -106,7 +113,7 @@ let parse =
         let filtered = List.filter filtered ~f:(fun x -> not (Char.(=) (String.get x 0) ';')) in
         let str = String.concat ~sep:"\n" filtered in
 
-        parse_string ~consume:All (many lisp) str
+        parse_string ~consume:All (many lisp) (str ^ "\n")
     )
 
 (* the abstract syntax tree representation for this lisp *)
@@ -146,11 +153,6 @@ and environment = {
 
 exception SyntaxError of string
 
-let is_syntactic_keyword = function
-    | "and" | "or" | "set!"
-    | "if" | "lambda" | "begin" -> true
-    | _ -> false
-
 let _null = { is_mutable = false; value = Pair Nil }
 
 let null = Object (ref _null)
@@ -161,6 +163,7 @@ let rec actualize (parse_tree: lisp_parse): lisp =
     | IntegerLiteral x -> Integer x
     | FloatLiteral x -> Float x
     | BooleanLiteral x -> Boolean x
+    | CharLiteral x -> Char x
 
     (* string constants are not mutable *)
     | StringLiteral x -> Object (ref { is_mutable = false; value = String x })
@@ -212,7 +215,11 @@ let rec show_lisp (ast: lisp) =
     | Float x -> Float.to_string x
     | Boolean x -> if x then "#t" else "#f"
     | Symbol x -> x
-    | Char x -> Char.to_string x
+    | Char x -> "#\\" ^ (
+        match x with
+        | '\n' -> "newline"
+        | ' ' -> "space"
+        | _ -> Char.to_string x)
     | Quote x -> "'" ^ (show_lisp x)
 
 and show_reference_value rv =
@@ -276,19 +283,24 @@ let cdr list =
 let cadr = Fn.compose car cdr
 let cddr = Fn.compose cdr cdr
 
-let is_null x =
-    match x with
+let is_null = function
     | Object { contents = {is_mutable = _; value = Pair Nil } } -> true
     | _ -> false
 
-let is_symbol x =
-    match x with
+let is_symbol = function
     | Symbol _ -> true
     | _ -> false
 
-let is_list x =
-    match x with
+let is_pair = function
     | Object { contents = { is_mutable = _; value = Pair _ } } -> true
+    | _ -> false
+
+let is_char = function
+    | Char _ -> true
+    | _ -> false
+
+let is_string = function
+    | Object { contents = { is_mutable = _; value = String _}} -> true
     | _ -> false
 
 let env_new parent =
@@ -626,11 +638,11 @@ let _not args =
         | Boolean x -> Boolean (not x)
         | _ -> raise (RuntimeError "argument to 'not' is not the correct type")
 
-let _is_list args =
+let _predicate name f args =
     if not (phys_equal 1 (length_list args)) then
-        raise (RuntimeError "list? expects exactly one argument")
+        raise (RuntimeError (name ^ " expects exactly one argument"))
     else
-        Boolean (is_proper_list (car args))
+        Boolean (f (car args))
 
 let _display args =
     let _ = if is_proper_list args then
@@ -654,7 +666,10 @@ let _ =
     env_set global_env ~key:"cdr" ~data:(Object (ref {is_mutable = false; value = Builtin _cdr}));
     env_set global_env ~key:"not" ~data:(Object (ref {is_mutable = false; value = Builtin _not}));
     env_set global_env ~key:"display" ~data:(Object (ref {is_mutable = false; value = Builtin _display}));
-    env_set global_env ~key:"list?" ~data:(Object (ref {is_mutable = false; value = Builtin _is_list}))
+    env_set global_env ~key:"list?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "list?" is_proper_list)}));
+    env_set global_env ~key:"string?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "string?" is_string)}));
+    env_set global_env ~key:"pair?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "pair?" is_pair)}));
+    env_set global_env ~key:"char?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "char?" is_char)}))
 
 (* REPL *)
 exception EndOfInput
@@ -674,7 +689,7 @@ let repl () =
                     Buffer.add_string buf input;
                     let lps = count_char '(' (Buffer.contents buf) in
                     let rps = count_char ')' (Buffer.contents buf) in
-                    if phys_equal lps rps && lps > 0 then
+                    if phys_equal lps rps then
                         loop_over := true
                     else if rps > lps then 
                         raise (SyntaxError "too many right parentheses")
@@ -703,7 +718,6 @@ let repl () =
         | EndOfInput -> over := true
     done;
     ()
-
 
 let runfile file =
     let ic = In_channel.create file in
@@ -739,12 +753,16 @@ let _ =
     let () = Caml.Arg.parse speclist anon_fun usage_msg;
 
     match !input_files with
-    | [] -> print "No arguments provided"; repl ();
+    | [] -> repl ();
     | [filename] -> (
         runfile filename;
         if !interactive then
             repl ();
     )
-    | list -> List.iter ~f:runfile list;
+    | list -> (
+        List.iter ~f:runfile list;
+        if !interactive then
+            repl ();
+    )
     in
     ()
