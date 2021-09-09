@@ -2,7 +2,7 @@ open Base
 open Stdio
 
 (*
-    OScheme - a (somewhat) R5RS-compliant Scheme written in a single file of OCaml
+    OSchemel - a (somewhat) R5RS-compliant Scheme written in a single file of OCaml
 *)
 
 (* 
@@ -77,28 +77,35 @@ let parse =
     -> true | _ -> false) <?> "atom"
         >>| fun x -> Atom x in
 
-    let ws = skip_while (function
-      | '\x20' | '\x0a' | '\x0d' | '\x09' -> true
-      | _ -> false) in
 
-    let comment = char ';' >>= fun _ -> skip_while (function '\n' -> false | _ -> true)
+    let comment = option () (char ';'
+    >>= fun x-> 
+        match x with
+        | ';' -> skip_while (function '\n' -> false | _ -> true) <* char '\n'
+        | _ -> return ()
+    )
     in
 
+    let ws = (skip_while (function
+        | '\x20' | '\x0a' | '\x0d' | '\x09' -> true
+      | _ -> false)) in
+
     let lisp = fix (fun lisp ->
-        let ele = (choice [num; string; boolean_true; boolean_false; atom]) in
+        let ele = (choice [num; string; boolean_true; boolean_false; atom]) <* ws <* comment in
         let list = ws *> lp *> many (ws *> lisp <* ws) <* rp <* ws >>| fun x -> List x in
-        (both (option '\x00' quote) (list <|> ele)
+        (both (option '\x00' quote) (list <* comment <|> ele)
         >>| fun res -> match res with
         | ('\'', x) -> Quote x
         | (_, x) -> x)
     ) in
 
     fun x -> (
+        (* remove line comments *)
         let lines = Str.split (Str.regexp "\n") x in
         let filtered = List.filter lines ~f:(fun x -> String.length x > 0) in
         let filtered = List.filter filtered ~f:(fun x -> not (Char.(=) (String.get x 0) ';')) in
         let str = String.concat ~sep:"\n" filtered in
-        print str;
+
         parse_string ~consume:All (many lisp) str
     )
 
@@ -703,7 +710,7 @@ let runfile file =
     let str = In_channel.input_all ic in
     let _ = match parse str with
     | Ok res -> (
-        List.iter ~f:(fun x -> print (show_lisp_parse x)) res;
+        (* List.iter ~f:(fun x -> print (show_lisp_parse x)) res; *)
         let asts = List.map ~f:actualize res in
         (* print (show_lisp ast); *)
         let interpret ast = 
