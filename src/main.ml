@@ -23,6 +23,8 @@ open Stdio
         - random blog posts on the internet about Lisp/Scheme
 *)
 
+(* TODO: Macros *)
+
 (** Utility functions **)
 let print str =
     Out_channel.output_string stdout str;
