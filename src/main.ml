@@ -307,6 +307,10 @@ let is_procedure = function
     | Object { contents = { is_mutable = _; value = Lambda _}} -> true
     | _ -> false
 
+let is_number = function Integer _ | Float _ -> true | _ -> false
+
+let is_boolean = function Boolean _ -> true | _ -> false
+
 let env_new parent =
     match parent with
     | Some parent_env -> { parent = Some (ref parent_env); table = Hashtbl.create(module String) }
@@ -452,6 +456,18 @@ let rec eval (env: environment) (ast: lisp): lisp =
                     | _ -> raise (RuntimeError "")
                 with
                 | RuntimeError msg -> print msg; raise (SyntaxError "Incorrect usage of define")
+            )
+
+    | Object { contents = { is_mutable = _; value = Pair (CC (Symbol "define-syntax", args)) } }
+        when is_undefined env (Symbol "define-syntax") -> 
+            (
+                if not (phys_equal 2 (length_list args)) then
+                    raise (RuntimeError ("define-syntax expects exactly two arguments"))
+                else (
+                    let keyword = car args in
+                    let transform_spec = cadr args in
+                    null
+                )
             )
 
     (* all other procedure calls *)
@@ -726,6 +742,8 @@ let _ =
     env_set global_env ~key:"pair?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "pair?" is_pair)}));
     env_set global_env ~key:"char?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "char?" is_char)}));
     env_set global_env ~key:"procedure?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "procedure?" is_procedure)}));
+    env_set global_env ~key:"number?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "number?" is_number)}));
+    env_set global_env ~key:"boolean?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "boolean?" is_boolean)}));
 
 (* REPL *)
 exception EndOfInput
