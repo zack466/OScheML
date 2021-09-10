@@ -2,7 +2,7 @@ open Base
 open Stdio
 
 (*
-    OSchemel - a R5RS-inspired Scheme written in a single file of OCaml
+    OScheML - a R5RS-inspired Scheme written in a single file of OCaml
 *)
 
 (* 
@@ -23,11 +23,15 @@ open Stdio
         - random blog posts on the internet about Lisp/Scheme
 *)
 
+(* TODO: Macros *)
+
+(** Utility functions **)
 let print str =
     Out_channel.output_string stdout str;
     Out_channel.output_string stdout "\n";
     Out_channel.flush stdout;
 
+(*** PARSING ***)
 type lisp_parse =
     | Atom of string
     | IntegerLiteral of int
@@ -58,7 +62,7 @@ let parse =
         try return (FloatLiteral (Float.of_string s))
         with _ -> fail "invalid number literal" in
 
-    let char_const = string "#\\" *>
+    let _char = string "#\\" *>
     ((string "space" >>| fun _ -> CharLiteral ' ')
     <|> (string "newline" >>| fun _ -> CharLiteral '\n')
     <|> (take 1 >>| fun x -> CharLiteral (String.get x 0)))
@@ -80,10 +84,8 @@ let parse =
         | 'a' .. 'z' | '!' | '$' | '%' | '&'
         | '*' | '+' | '-' | '.' | '/' | ':' | '<'
         | '=' | '>' | '?' | '@' | '^' | '_' | '~'
-
     -> true | _ -> false) <?> "atom"
         >>| fun x -> Atom x in
-
 
     let comment = option () (char ';'
     >>= fun x-> 
@@ -98,7 +100,7 @@ let parse =
       | _ -> false)) in
 
     let lisp = fix (fun lisp ->
-        let ele = (choice [num; char_const; string; boolean_true; boolean_false; atom]) <* ws <* comment in
+        let ele = (choice [num; _char; string; boolean_true; boolean_false; atom]) <* ws <* comment in
         let list = ws *> lp *> many (ws *> lisp <* ws) <* rp <* ws >>| fun x -> List x in
         (both (option '\x00' quote) (list <* comment <|> ele)
         >>| fun res -> match res with
@@ -106,14 +108,18 @@ let parse =
         | (_, x) -> x)
     ) in
 
-    fun x -> (
+    fun input -> (
         (* remove line comments *)
-        let lines = Str.split (Str.regexp "\n") x in
-        let filtered = List.filter lines ~f:(fun x -> String.length x > 0) in
-        let filtered = List.filter filtered ~f:(fun x -> not (Char.(=) (String.get x 0) ';')) in
-        let str = String.concat ~sep:"\n" filtered in
+        let lines = Str.split (Str.regexp "\n") input in
+        let filtered = List.filter lines
+            ~f:(fun x ->
+                (String.length x > 0) && not (Char.(=) ';' (String.get x 0))
+            ) in
+        (* recombine lines *)
+        let str = (String.concat ~sep:"\n" filtered) ^ "\n" in
 
-        parse_string ~consume:All (many lisp) (str ^ "\n")
+        (* call parser on filtered input *)
+        parse_string ~consume:All (many lisp) str
     )
 
 (* the abstract syntax tree representation for this lisp *)
@@ -136,16 +142,16 @@ and reference_value =
 
     (* | Vector of lisp Array.t *)
 
-    (* a string *)
     | String of string
 
     (* a compound procedure, which holds both a closure and the procedure itself *)
     | Lambda of environment * lisp
 
-    (* a builtin procedure, which can only be accessed from the initial environment *)
+    (* a builtin procedure, which is represented as an OCaml function that operates on ASTs *)
     | Builtin of (environment -> lisp -> lisp)
 
 and pair = Nil | CC of lisp * lisp
+
 and environment = {
     parent: environment ref option;
     table: (string, lisp) Hashtbl.t
@@ -154,9 +160,12 @@ and environment = {
 exception SyntaxError of string
 
 let _null = { is_mutable = false; value = Pair Nil }
-
 let null = Object (ref _null)
 
+(*
+ * Converts a parse tree into a full AST
+ * Is mostly trivial, except that certain literals must be turned into reference objects
+ *)
 let rec actualize (parse_tree: lisp_parse): lisp =
     match parse_tree with
     | Atom x -> Symbol x
@@ -205,12 +214,12 @@ let rec to_list (ls: lisp) =
     | Object {contents = {is_mutable = _; value = Pair (CC (hd, tl)) } } -> hd :: to_list tl
     | _ -> assert false
 
+(* for debugging *)
 let rec show_lisp (ast: lisp) =
     match ast with
     | list when is_proper_list list -> "(" ^ String.concat ~sep:" " (List.map (to_list list) ~f:show_lisp) ^ ")"
     | Object { contents = {is_mutable = _; value = y}} -> show_reference_value y
 
-    (* Primitives are immutable and reside on the stack (at least, behavior-wise) *)
     | Integer x -> Int.to_string x
     | Float x -> Float.to_string x
     | Boolean x -> if x then "#t" else "#f"
@@ -233,8 +242,7 @@ and show_reference_value rv =
 (* Eval / Apply *)
 exception RuntimeError of string
 
-let rec env_lookup (env: environment) symbol =
-    match symbol with
+let rec env_lookup (env: environment) = function
     | Symbol name -> (
         match env with
         (* root environment *)
@@ -251,8 +259,7 @@ let rec env_lookup (env: environment) symbol =
     )
     | _ -> raise (RuntimeError "cannot lookup a non-symbol")
 
-let is_undefined (env: environment) symbol: bool =
-    match symbol with
+let is_undefined (env: environment) = function
     | Symbol name -> (
         try
             match env_lookup env (Symbol name) with
@@ -262,8 +269,7 @@ let is_undefined (env: environment) symbol: bool =
     )
     | _ -> raise (RuntimeError "cannot lookup a non-symbol")
 
-let car list =
-    match list with
+let car = function
     | (Object { contents = {is_mutable = _; value = Pair p} }) -> (
         match p with
         | Nil -> raise (RuntimeError "cannot take car of an empty list")
@@ -271,8 +277,7 @@ let car list =
     )
     | _ -> raise (RuntimeError "cannot take the car of this object")
 
-let cdr list =
-    match list with
+let cdr = function
     | (Object { contents = {is_mutable = _; value = Pair p} }) -> (
         match p with
         | Nil -> raise (RuntimeError "cannot take cdr of an empty list")
