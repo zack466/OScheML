@@ -40,6 +40,9 @@ type lisp_parse =
     | StringLiteral of string
     | CharLiteral of char
     | Quote of lisp_parse
+    | QQ of lisp_parse
+    | Comma of lisp_parse
+    | CommaAt of lisp_parse
     | List of lisp_parse list
 [@@deriving show]
 
@@ -49,7 +52,11 @@ let parse =
 
     let lp = char '(' <?> "lparen" in
     let rp = char ')' <?> "rparen" in
+    let noquote = return '\x00' <?> "no quote" in
     let quote = char '\'' <?> "quote" in
+    let qquote = char '`' <?> "quasiquote" in
+    let unquote = char ',' <?> "unquote" in
+    let unquote_at = char ',' *> char '@' <?> "unquote" in
 
     let num =
         take_while1 (function
@@ -102,10 +109,14 @@ let parse =
     let lisp = fix (fun lisp ->
         let ele = (choice [num; _char; string; boolean_true; boolean_false; atom]) <* ws <* comment in
         let list = ws *> lp *> many (ws *> lisp <* ws) <* rp <* ws >>| fun x -> List x in
-        (both (option '\x00' quote) (list <* comment <|> ele)
+        both (choice [unquote_at; noquote; quote; qquote; unquote;]) (list <* comment <|> ele)
         >>| fun res -> match res with
+        | ('`', x) -> QQ x
+        | (',', x) -> Comma x
+        | ('@', x) -> CommaAt x
         | ('\'', x) -> Quote x
-        | (_, x) -> x)
+        | ('\x00', x) -> x
+        | _ -> assert false
     ) in
 
     fun input -> (
@@ -134,7 +145,9 @@ type lisp =
     | Symbol of string
     | Char of char
     | Quote of lisp
-
+    | Quasiquote of lisp
+    | Unquote of lisp
+    | UnquoteList of lisp
 and reference = {is_mutable: bool; value: reference_value}
 and reference_value =
     (* Homebrewed linked list *)
@@ -178,6 +191,9 @@ let rec actualize (parse_tree: lisp_parse): lisp =
     | StringLiteral x -> Object (ref { is_mutable = false; value = String x })
 
     | Quote x -> Quote (actualize x)
+    | QQ x -> Quasiquote (actualize x)
+    | Comma x -> Unquote (actualize x)
+    | CommaAt x -> UnquoteList (actualize x)
 
     | List x -> (
         match x with
@@ -229,7 +245,12 @@ let rec show_lisp (ast: lisp) =
         | '\n' -> "newline"
         | ' ' -> "space"
         | _ -> Char.to_string x)
+
+    (* quoting and quasiquoting *)
     | Quote x -> "'" ^ (show_lisp x)
+    | Quasiquote x -> "`" ^ (show_lisp x)
+    | Unquote x -> "," ^ (show_lisp x)
+    | UnquoteList x -> ",@" ^ (show_lisp x)
 
 and show_reference_value rv =
     match rv with
@@ -368,6 +389,9 @@ let rec eval (env: environment) (ast: lisp): lisp =
     | Char x -> Char x
     | Symbol x -> env_lookup env (Symbol x)
     | Quote x -> x
+    | Unquote x -> x
+    | UnquoteList x -> x
+    | Quasiquote x -> x
 
     (*** Object types ***)
 
@@ -469,8 +493,8 @@ let rec eval (env: environment) (ast: lisp): lisp =
                 if not (phys_equal 2 (length_list args)) then
                     raise (RuntimeError ("define-syntax expects exactly two arguments"))
                 else (
-                    let keyword = car args in
-                    let transform_spec = cadr args in
+                    (* let keyword = car args in
+                    let transform_spec = cadr args in *)
                     null
                 )
             )
