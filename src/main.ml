@@ -52,7 +52,7 @@ let parse =
 
     let lp = char '(' <?> "lparen" in
     let rp = char ')' <?> "rparen" in
-    let noquote = return '\x00' <?> "no quote" in
+
     let quote = char '\'' <?> "quote" in
     let qquote = char '`' <?> "quasiquote" in
     let unquote = char ',' <?> "unquote" in
@@ -109,7 +109,7 @@ let parse =
     let lisp = fix (fun lisp ->
         let ele = (choice [num; _char; string; boolean_true; boolean_false; atom]) <* ws <* comment in
         let list = ws *> lp *> many (ws *> lisp <* ws) <* rp <* ws >>| fun x -> List x in
-        both (choice [unquote_at; noquote; quote; qquote; unquote;]) (list <* comment <|> ele)
+        both (option '\x00'(choice [unquote_at; quote; qquote; unquote;])) (list <* comment <|> ele)
         >>| fun res -> match res with
         | ('`', x) -> QQ x
         | (',', x) -> Comma x
@@ -388,10 +388,23 @@ let rec eval (env: environment) (ast: lisp): lisp =
     | Boolean x -> Boolean x
     | Char x -> Char x
     | Symbol x -> env_lookup env (Symbol x)
+
     | Quote x -> x
-    | Unquote x -> x
+    | Quasiquote ast -> (
+        let rec qq_eval ast =
+            match ast with
+            | Object { contents = { is_mutable = _; value = Pair Nil } } as empty_list -> empty_list
+            | Object { contents = { is_mutable = _; value = Pair (CC (hd, tl)) } } -> (
+                cons (qq_eval hd) (qq_eval tl)
+            )
+            | Unquote x -> eval env x
+            | UnquoteList x -> eval env x
+            | x -> x
+            in
+        qq_eval ast
+    )
+    | Unquote x -> eval env x
     | UnquoteList x -> x
-    | Quasiquote x -> x
 
     (*** Object types ***)
 
@@ -401,7 +414,7 @@ let rec eval (env: environment) (ast: lisp): lisp =
     | Object { contents = { is_mutable = _; value = Lambda (_, _) } } as procedure -> procedure
     | Object { contents = { is_mutable = _; value = Builtin _ } } as procedure -> procedure
 
-    (* These evaluate as a special form as long as their syntactic keyword has not been defined as a variable *)
+    (* These evaluate as a special form as long as their syntactic keyword has not been shadowed *)
     | Object { contents = { is_mutable = _; value = Pair (CC (Symbol "if", tl)) } }
         when is_undefined env (Symbol "if") -> (
             let condition, tl2 = car tl, cdr tl in
@@ -801,7 +814,7 @@ let repl () =
             done in
             match parse (Buffer.contents buf) with
             | Ok res -> (
-                (* print (show_lisp_parse res); *)
+                List.iter ~f:(Fn.compose print show_lisp_parse) res;
                 let asts = List.map ~f:actualize res in
                 (* print (show_lisp ast); *)
                 let interpret ast = 
