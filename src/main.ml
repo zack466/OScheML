@@ -160,6 +160,9 @@ and reference_value =
     (* a compound procedure, which holds both a closure and the procedure itself *)
     | Lambda of environment * lisp
 
+    (* An instance of syntax-rules - a macro *)
+    | Syntax of environment * lisp
+
     (* a builtin procedure, which is represented as an OCaml function that operates on ASTs *)
     | Builtin of (environment -> lisp -> lisp)
 
@@ -255,6 +258,7 @@ let rec show_lisp (ast: lisp) =
 and show_reference_value rv =
     match rv with
     | Lambda (_, body) -> "Compound procedure: " ^ (show_lisp body)
+    | Syntax (_, body) -> "Macro: " ^ (show_lisp body)
     | Builtin _ -> "Builtin procedure"
     | Pair Nil -> "()"
     | Pair (CC (a, b)) -> "(" ^ (show_lisp a) ^ " . " ^ (show_lisp b) ^ ")"
@@ -319,6 +323,10 @@ let is_symbol = function
 
 let is_pair = function
     | Object { contents = { is_mutable = _; value = Pair _ } } -> true
+    | _ -> false
+
+let is_macro = function
+    | Object { contents = { is_mutable = _; value = Syntax _ } } -> true
     | _ -> false
 
 let is_char = function
@@ -414,7 +422,9 @@ let rec eval (env: environment) (ast: lisp): lisp =
     | Object { contents = { is_mutable = _; value = Lambda (_, _) } } as procedure -> procedure
     | Object { contents = { is_mutable = _; value = Builtin _ } } as procedure -> procedure
 
+
     (* These evaluate as a special form as long as their syntactic keyword has not been shadowed *)
+    | Object { contents = { is_mutable = _; value = Syntax (_, _) } } -> raise (RuntimeError "Syntactic keyword may not be used as an expression")
     | Object { contents = { is_mutable = _; value = Pair (CC (Symbol "if", tl)) } }
         when is_undefined env (Symbol "if") -> (
             let condition, tl2 = car tl, cdr tl in
@@ -506,11 +516,43 @@ let rec eval (env: environment) (ast: lisp): lisp =
                 if not (phys_equal 2 (length_list args)) then
                     raise (RuntimeError ("define-syntax expects exactly two arguments"))
                 else (
-                    (* let keyword = car args in
-                    let transform_spec = cadr args in *)
+                    let keyword = car args in
+
+                    let transform_spec = cadr args in
+                    let _ = if (length_list transform_spec) < 2 then
+                        raise (RuntimeError ("invalid transform spec syntax"))
+                    else if match (car transform_spec) with Symbol "syntax-rules" -> false | _ -> true then
+                        raise (RuntimeError ("invalid transform spec"))
+                    in
+
+                    let ts = Object (ref {is_mutable = false; value = Syntax (env, transform_spec)}) in
+                    let _ = match keyword with 
+                    | Symbol name -> env_set env ~key:name ~data:ts
+                    | _ -> raise (RuntimeError "invalid use of define-syntax")
+                    in
                     null
                 )
             )
+
+    (* macros *)
+    | Object { contents = { is_mutable = _; value = Pair (CC (Symbol _ as kw, args)) } } when is_macro (env_lookup env kw) -> (
+        (* env , (syntax-rules literals (pattern template) ... ) *)
+        let _ = args in
+        match (env_lookup env kw) with
+        | Object { contents = { is_mutable = _; value = Syntax (closure, body)}} -> (
+            let new_env = env_new (Some closure) in
+            let _ = new_env in
+            let _ = if not (length_list body >= 3) then
+                raise (RuntimeError "Invalid number of arguments to syntax-rules")
+            in
+            let _ = match (car body) with
+            | Symbol "syntax-rules" -> ()
+            | _ -> raise (RuntimeError "Invalid transformer spec")
+            in
+            body
+        )
+        | _ -> assert false
+    )
 
     (* all other procedure calls *)
     | Object { contents = { is_mutable = _; value = Pair (CC (hd, tl)) } } -> (
