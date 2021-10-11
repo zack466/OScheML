@@ -41,7 +41,7 @@ open Stdio
         - Lists: cons, car, cdr, list?, pair?
         - Equality: eq?, eqv? equal?
         - Predicates: pair?, list?, string?, char?, procedure?, number?, boolean?
-        - Misc: lambda, begin, set!, define, apply, display
+        - Other: lambda, begin, set!, define, apply, display
 *)
 
 (** Utility functions **)
