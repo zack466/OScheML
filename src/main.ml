@@ -23,7 +23,26 @@ open Stdio
         - random blog posts on the internet about Lisp/Scheme
 *)
 
-(* TODO: Macros *)
+(*
+    FEATURES:
+        - Datatypes:
+            - Integer (fixed width)
+            - Float (IEEE-754 double precision)
+            - Boolean (#t and #f)
+            - Character
+            - String
+            - Symbol
+        - Quoting
+        - Lambda
+
+    BUILTINS:
+        - Arithmetic (auto-promoting): +, -, *, /, <, <=, >, >=
+        - Logic: if, not, and & or (with short-circuiting)
+        - Lists: cons, car, cdr, list?, pair?
+        - Equality: eq?, eqv? equal?
+        - Predicates: pair?, list?, string?, char?, procedure?, number?, boolean?
+        - Misc: lambda, begin, set!, define, apply, display
+*)
 
 (** Utility functions **)
 let print str =
@@ -40,9 +59,6 @@ type lisp_parse =
     | StringLiteral of string
     | CharLiteral of char
     | Quote of lisp_parse
-    | QQ of lisp_parse
-    | Comma of lisp_parse
-    | CommaAt of lisp_parse
     | List of lisp_parse list
 [@@deriving show]
 
@@ -54,9 +70,6 @@ let parse =
     let rp = char ')' <?> "rparen" in
 
     let quote = char '\'' <?> "quote" in
-    let qquote = char '`' <?> "quasiquote" in
-    let unquote = char ',' <?> "unquote" in
-    let unquote_at = char ',' *> char '@' <?> "unquote" in
 
     let num =
         take_while1 (function
@@ -109,11 +122,8 @@ let parse =
     let lisp = fix (fun lisp ->
         let ele = (choice [num; _char; string; boolean_true; boolean_false; atom]) <* ws <* comment in
         let list = ws *> lp *> many (ws *> lisp <* ws) <* rp <* ws >>| fun x -> List x in
-        both (option '\x00'(choice [unquote_at; quote; qquote; unquote;])) (list <* comment <|> ele)
+        both (option '\x00' quote) (list <* comment <|> ele)
         >>| fun res -> match res with
-        | ('`', x) -> QQ x
-        | (',', x) -> Comma x
-        | ('@', x) -> CommaAt x
         | ('\'', x) -> Quote x
         | ('\x00', x) -> x
         | _ -> assert false
@@ -145,9 +155,6 @@ type lisp =
     | Symbol of string
     | Char of char
     | Quote of lisp
-    | Quasiquote of lisp
-    | Unquote of lisp
-    | UnquoteList of lisp
 and reference = {is_mutable: bool; value: reference_value}
 and reference_value =
     (* Homebrewed linked list *)
@@ -159,9 +166,6 @@ and reference_value =
 
     (* a compound procedure, which holds both a closure and the procedure itself *)
     | Lambda of environment * lisp
-
-    (* An instance of syntax-rules - a macro *)
-    | Syntax of environment * lisp
 
     (* a builtin procedure, which is represented as an OCaml function that operates on ASTs *)
     | Builtin of (environment -> lisp -> lisp)
@@ -194,9 +198,6 @@ let rec actualize (parse_tree: lisp_parse): lisp =
     | StringLiteral x -> Object (ref { is_mutable = false; value = String x })
 
     | Quote x -> Quote (actualize x)
-    | QQ x -> Quasiquote (actualize x)
-    | Comma x -> Unquote (actualize x)
-    | CommaAt x -> UnquoteList (actualize x)
 
     | List x -> (
         match x with
@@ -251,14 +252,10 @@ let rec show_lisp (ast: lisp) =
 
     (* quoting and quasiquoting *)
     | Quote x -> "'" ^ (show_lisp x)
-    | Quasiquote x -> "`" ^ (show_lisp x)
-    | Unquote x -> "," ^ (show_lisp x)
-    | UnquoteList x -> ",@" ^ (show_lisp x)
 
 and show_reference_value rv =
     match rv with
     | Lambda (_, body) -> "Compound procedure: " ^ (show_lisp body)
-    | Syntax (_, body) -> "Macro: " ^ (show_lisp body)
     | Builtin _ -> "Builtin procedure"
     | Pair Nil -> "()"
     | Pair (CC (a, b)) -> "(" ^ (show_lisp a) ^ " . " ^ (show_lisp b) ^ ")"
@@ -323,10 +320,6 @@ let is_symbol = function
 
 let is_pair = function
     | Object { contents = { is_mutable = _; value = Pair _ } } -> true
-    | _ -> false
-
-let is_macro = function
-    | Object { contents = { is_mutable = _; value = Syntax _ } } -> true
     | _ -> false
 
 let is_char = function
@@ -398,21 +391,6 @@ let rec eval (env: environment) (ast: lisp): lisp =
     | Symbol x -> env_lookup env (Symbol x)
 
     | Quote x -> x
-    | Quasiquote ast -> (
-        let rec qq_eval ast =
-            match ast with
-            | Object { contents = { is_mutable = _; value = Pair Nil } } as empty_list -> empty_list
-            | Object { contents = { is_mutable = _; value = Pair (CC (hd, tl)) } } -> (
-                cons (qq_eval hd) (qq_eval tl)
-            )
-            | Unquote x -> eval env x
-            | UnquoteList x -> eval env x
-            | x -> x
-            in
-        qq_eval ast
-    )
-    | Unquote x -> eval env x
-    | UnquoteList x -> x
 
     (*** Object types ***)
 
@@ -424,7 +402,6 @@ let rec eval (env: environment) (ast: lisp): lisp =
 
 
     (* These evaluate as a special form as long as their syntactic keyword has not been shadowed *)
-    | Object { contents = { is_mutable = _; value = Syntax (_, _) } } -> raise (RuntimeError "Syntactic keyword may not be used as an expression")
     | Object { contents = { is_mutable = _; value = Pair (CC (Symbol "if", tl)) } }
         when is_undefined env (Symbol "if") -> (
             let condition, tl2 = car tl, cdr tl in
@@ -509,50 +486,6 @@ let rec eval (env: environment) (ast: lisp): lisp =
                 with
                 | RuntimeError msg -> print msg; raise (SyntaxError "Incorrect usage of define")
             )
-
-    | Object { contents = { is_mutable = _; value = Pair (CC (Symbol "define-syntax", args)) } }
-        when is_undefined env (Symbol "define-syntax") -> 
-            (
-                if not (phys_equal 2 (length_list args)) then
-                    raise (RuntimeError ("define-syntax expects exactly two arguments"))
-                else (
-                    let keyword = car args in
-
-                    let transform_spec = cadr args in
-                    let _ = if (length_list transform_spec) < 2 then
-                        raise (RuntimeError ("invalid transform spec syntax"))
-                    else if match (car transform_spec) with Symbol "syntax-rules" -> false | _ -> true then
-                        raise (RuntimeError ("invalid transform spec"))
-                    in
-
-                    let ts = Object (ref {is_mutable = false; value = Syntax (env, transform_spec)}) in
-                    let _ = match keyword with 
-                    | Symbol name -> env_set env ~key:name ~data:ts
-                    | _ -> raise (RuntimeError "invalid use of define-syntax")
-                    in
-                    null
-                )
-            )
-
-    (* macros *)
-    | Object { contents = { is_mutable = _; value = Pair (CC (Symbol _ as kw, args)) } } when is_macro (env_lookup env kw) -> (
-        (* env , (syntax-rules literals (pattern template) ... ) *)
-        let _ = args in
-        match (env_lookup env kw) with
-        | Object { contents = { is_mutable = _; value = Syntax (closure, body)}} -> (
-            let new_env = env_new (Some closure) in
-            let _ = new_env in
-            let _ = if not (length_list body >= 3) then
-                raise (RuntimeError "Invalid number of arguments to syntax-rules")
-            in
-            let _ = match (car body) with
-            | Symbol "syntax-rules" -> ()
-            | _ -> raise (RuntimeError "Invalid transformer spec")
-            in
-            body
-        )
-        | _ -> assert false
-    )
 
     (* all other procedure calls *)
     | Object { contents = { is_mutable = _; value = Pair (CC (hd, tl)) } } -> (
@@ -812,15 +745,19 @@ let _ =
     env_set global_env ~key:">" ~data:(Object (ref {is_mutable = false; value = Builtin _gt}));
     env_set global_env ~key:"<=" ~data:(Object (ref {is_mutable = false; value = Builtin _lte}));
     env_set global_env ~key:">=" ~data:(Object (ref {is_mutable = false; value = Builtin _gte}));
+
     env_set global_env ~key:"eqv?" ~data:(Object (ref {is_mutable = false; value = Builtin (fun _ -> fun x -> Boolean (is_eqv x))}));
     env_set global_env ~key:"eq?" ~data:(Object (ref {is_mutable = false; value = Builtin (fun _ -> fun x -> Boolean (is_eq x))}));
     env_set global_env ~key:"equal?" ~data:(Object (ref {is_mutable = false; value = Builtin (fun _ -> fun x -> Boolean (is_equal x))}));
+
     env_set global_env ~key:"car" ~data:(Object (ref {is_mutable = false; value = Builtin _car}));
     env_set global_env ~key:"cdr" ~data:(Object (ref {is_mutable = false; value = Builtin _cdr}));
     env_set global_env ~key:"cons" ~data:(Object (ref {is_mutable = false; value = Builtin _cons}));
-    env_set global_env ~key:"apply" ~data:(Object (ref {is_mutable = false; value = Builtin _apply}));
+
     env_set global_env ~key:"not" ~data:(Object (ref {is_mutable = false; value = Builtin _not}));
+    env_set global_env ~key:"apply" ~data:(Object (ref {is_mutable = false; value = Builtin _apply}));
     env_set global_env ~key:"display" ~data:(Object (ref {is_mutable = false; value = Builtin _display}));
+
     env_set global_env ~key:"list?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "list?" is_proper_list)}));
     env_set global_env ~key:"string?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "string?" is_string)}));
     env_set global_env ~key:"pair?" ~data:(Object (ref {is_mutable = false; value = Builtin (_predicate "pair?" is_pair)}));
@@ -856,7 +793,7 @@ let repl () =
             done in
             match parse (Buffer.contents buf) with
             | Ok res -> (
-                List.iter ~f:(Fn.compose print show_lisp_parse) res;
+                (* List.iter ~f:(Fn.compose print show_lisp_parse) res; *)
                 let asts = List.map ~f:actualize res in
                 (* print (show_lisp ast); *)
                 let interpret ast = 
