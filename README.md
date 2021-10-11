@@ -19,6 +19,11 @@
 - Predicates: pair?, list?, string?, char?, procedure?, number?, boolean?
 - Other: lambda, begin, set!, define, apply, display
 
+## USAGE:
+- run `dune exec ./src/main.exe` to enter a REPL
+- to run a script, add file path as an argument
+   - ex: `dune exec ./src/main.exe examples/sqrt.scm`
+
 ## ARCHITECTURE:
 - input -> parse -> actualize -> eval
 
