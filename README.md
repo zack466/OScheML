@@ -1,4 +1,4 @@
-# OScheML - a R5RS-inspired Scheme written in a single file of OCaml
+# OScheML - a R5RS-inspired Scheme written in OCaml
 
 ## FEATURES:
 - Datatypes:
